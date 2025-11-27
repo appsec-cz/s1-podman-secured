@@ -681,6 +681,17 @@ class IgnitionProvider:
             except subprocess.CalledProcessError as e:
                 logger.error(f"Failed to enable systemd unit '{name}': {e.stderr.decode()}")
 
+        # Start mount units immediately (they need to be started, not just enabled)
+        if name.endswith('.mount'):
+            try:
+                logger.info(f"Starting mount unit '{name}'")
+                subprocess.run(['systemctl', 'start', name], check=True, capture_output=True, timeout=30)
+                logger.info(f"Started mount unit '{name}'")
+            except subprocess.CalledProcessError as e:
+                logger.warning(f"Failed to start mount unit '{name}': {e.stderr.decode()}")
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Timeout starting mount unit '{name}'")
+
     def extract_hostname_from_config(self, config: Dict[str, Any]) -> Optional[str]:
         """
         Extract hostname from Ignition config.
@@ -1014,10 +1025,133 @@ class IgnitionProvider:
         for unit in units:
             self.enable_systemd_unit(unit)
 
+        # Setup registries.conf.d symlink to host (after mounts are up)
+        self.setup_registries_conf_symlink(config)
+
         # Configure SentinelOne (after everything else)
         self.configure_sentinelone(config)
 
         logger.info("Ignition configuration applied successfully")
+
+    def setup_registries_conf_symlink(self, config: Dict[str, Any]) -> None:
+        """
+        Setup registry configuration for Podman Desktop compatibility.
+
+        Podman Desktop expects a symlink INSIDE /etc/containers/registries.conf.d/
+        that points to the host's ~/.config/containers/registries.conf FILE.
+
+        This method:
+        1. Finds host home via virtiofs mount (/Users/<username>)
+        2. Creates host registries.conf file if needed
+        3. Creates symlink inside VM's registries.conf.d/ pointing to host file
+        4. Adds default unqualified-search-registries config
+
+        Args:
+            config: Ignition configuration dict
+        """
+        logger.info("Setting up registry configuration for Podman Desktop")
+
+        # Find host home directory via virtiofs mount
+        # On macOS, /Users is mounted via virtiofs and contains the host user's home
+        host_home = None
+        users_mount = Path('/Users')
+
+        if users_mount.exists() and users_mount.is_dir():
+            # Look for user home directories in /Users (skip system dirs)
+            skip_dirs = {'Shared', 'Guest', '.localized'}
+            for entry in users_mount.iterdir():
+                if entry.is_dir() and entry.name not in skip_dirs and not entry.name.startswith('.'):
+                    # Check if this looks like a user home with containers config
+                    containers_config = entry / '.config' / 'containers'
+                    if containers_config.exists():
+                        host_home = entry
+                        logger.info(f"Found host home via virtiofs: {host_home}")
+                        break
+                    # Also accept homes without containers config yet
+                    elif (entry / '.config').exists() or (entry / 'Library').exists():
+                        host_home = entry
+                        logger.info(f"Found host home via virtiofs (no containers config yet): {host_home}")
+                        # Continue looking for one with containers config
+                        continue
+
+        if not host_home:
+            logger.warning("No host home directory found via virtiofs /Users mount")
+            logger.warning("Skipping registry configuration setup")
+            return
+
+        # Host registries.conf FILE path (not directory)
+        host_config_base = host_home / '.config' / 'containers'
+        host_registries_conf = host_config_base / 'registries.conf'
+        vm_registries_dir = Path('/etc/containers/registries.conf.d')
+
+        try:
+            # Create host config directory structure if needed
+            host_config_base.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Ensured host containers config exists: {host_config_base}")
+
+            # Create host registries.conf file if it doesn't exist
+            if not host_registries_conf.exists():
+                default_config = '''# Podman registries configuration
+# This file is managed by Podman Desktop
+
+unqualified-search-registries = ["docker.io", "quay.io", "gcr.io", "ghcr.io"]
+'''
+                host_registries_conf.write_text(default_config)
+                logger.info(f"Created host registries.conf: {host_registries_conf}")
+
+            # Ensure VM registries.conf.d is a directory (not a symlink)
+            if vm_registries_dir.is_symlink():
+                # If it's a symlink, we need to convert it to a directory
+                symlink_target = vm_registries_dir.resolve()
+                vm_registries_dir.unlink()
+                vm_registries_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"Converted registries.conf.d from symlink to directory")
+
+                # Copy files from old symlink target if they exist
+                if symlink_target.exists() and symlink_target.is_dir():
+                    import shutil
+                    for conf_file in symlink_target.glob('*.conf'):
+                        target = vm_registries_dir / conf_file.name
+                        if not target.exists():
+                            shutil.copy2(conf_file, target)
+                            logger.info(f"Copied {conf_file.name} from old symlink target")
+
+            elif not vm_registries_dir.exists():
+                vm_registries_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"Created registries.conf.d directory")
+
+            # Create symlink INSIDE registries.conf.d/ pointing to host's registries.conf FILE
+            # Podman Desktop checks: find /etc/containers/registries.conf.d/ -lname "$HOME/.config/containers/registries.conf"
+            symlink_path = vm_registries_dir / '999-podman-desktop.conf'
+            symlink_target = host_registries_conf
+
+            if symlink_path.is_symlink():
+                current_target = os.readlink(symlink_path)
+                if current_target != str(symlink_target):
+                    symlink_path.unlink()
+                    symlink_path.symlink_to(symlink_target)
+                    logger.info(f"Updated symlink: {symlink_path} -> {symlink_target}")
+                else:
+                    logger.info(f"Symlink already correct: {symlink_path}")
+            elif symlink_path.exists():
+                # Regular file exists, remove it and create symlink
+                symlink_path.unlink()
+                symlink_path.symlink_to(symlink_target)
+                logger.info(f"Replaced file with symlink: {symlink_path} -> {symlink_target}")
+            else:
+                symlink_path.symlink_to(symlink_target)
+                logger.info(f"Created symlink: {symlink_path} -> {symlink_target}")
+
+            # Also add default unqualified-search-registries if not present in VM config
+            default_search_conf = vm_registries_dir / '00-unqualified-search.conf'
+            if not default_search_conf.exists():
+                default_search_conf.write_text(
+                    'unqualified-search-registries = ["docker.io", "quay.io", "gcr.io", "ghcr.io"]\n'
+                )
+                logger.info(f"Created default search registries config: {default_search_conf}")
+
+        except Exception as e:
+            logger.error(f"Failed to setup registry configuration: {e}", exc_info=True)
 
     def run(self) -> int:
         """
