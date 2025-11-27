@@ -166,7 +166,8 @@ if [ ! -d "$DEBS_DIR" ] || [ -z "$(ls -A $DEBS_DIR 2>/dev/null)" ]; then
             iptables \
             nftables \
             iproute2 \
-            qemu-user-static \
+            qemu-user \
+            qemu-user-binfmt \
             cifs-utils \
             nfs-common \
             procps \
