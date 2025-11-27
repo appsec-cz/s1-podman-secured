@@ -347,6 +347,17 @@ systemctl enable ignition-provider.service
 echo "✓ Ignition provider installed"
 
 echo ""
+echo "=== Installing Rosetta Activation Service ==="
+# Install Rosetta activation script and service
+# This enables x86_64 binary translation via Apple Rosetta on ARM64 Macs
+# The service is installed but NOT enabled by default
+# Podman machine enables it via Ignition when Rosetta is requested
+install -m 755 /tmp/rosetta-activate.sh /usr/local/bin/rosetta-activate.sh
+install -m 644 /tmp/rosetta-activation.service /etc/systemd/system/rosetta-activation.service
+# Note: Service is NOT enabled here - Ignition will enable it when requested
+echo "✓ Rosetta activation service installed (disabled by default, enabled via Ignition)"
+
+echo ""
 echo "=== Configuring post-Ignition setup ==="
 # CRITICAL: Core user will be created by Ignition with dynamic UID
 # This service runs after Ignition creates the user to set up additional config
@@ -841,6 +852,8 @@ VIRT_CUSTOMIZE_ARGS=(
     --copy-in "$DEBS_DIR:/tmp/"
     --upload "$CACHE_DIR/install.sh:/tmp/install.sh"
     --upload "ignition-provider.py:/tmp/ignition-provider.py"
+    --upload "rosetta-activate.sh:/tmp/rosetta-activate.sh"
+    --upload "rosetta-activation.service:/tmp/rosetta-activation.service"
 )
 
 # Verbose mode support
@@ -879,7 +892,7 @@ fi
 # CRITICAL: Use 'set -o pipefail' to ensure errors from install.sh propagate through tee
 VIRT_CUSTOMIZE_ARGS+=(
     --run-command "set -o pipefail && bash -x /tmp/install.sh 2>&1 | tee /var/log/image-build-install.log"
-    --run-command "rm -rf /tmp/install.sh /tmp/debs /tmp/ignition-provider.py"
+    --run-command "rm -rf /tmp/install.sh /tmp/debs /tmp/ignition-provider.py /tmp/rosetta-activate.sh /tmp/rosetta-activation.service"
 )
 
 # Run virt-customize
