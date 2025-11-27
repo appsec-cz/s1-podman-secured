@@ -107,11 +107,11 @@ create_machine() {
 
 deploy_sentinelone() {
     local package_name=$(basename "$S1_PACKAGE")
-    local vm_hostname=$(hostname -s)
+    local vm_hostname="$(hostname -s)-podman"
 
     echo -e "${BLUE}Deploying SentinelOne...${NC}"
 
-    # Set hostname based on Mac hostname
+    # Set hostname based on Mac hostname with -podman suffix
     echo "  Setting hostname: $vm_hostname"
     podman machine ssh "$MACHINE_NAME" "sudo bash -c '
         echo \"$vm_hostname\" > /etc/hostname
@@ -187,7 +187,7 @@ set_default_machine() {
 }
 
 print_summary() {
-    local vm_hostname=$(hostname -s)
+    local vm_hostname="$(hostname -s)-podman"
 
     echo ""
     echo -e "${GREEN}========================================${NC}"
