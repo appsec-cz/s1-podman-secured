@@ -5,7 +5,7 @@
 # Creates a Podman machine with custom image and deploys SentinelOne agent.
 #
 # Usage:
-#   ./deploy.sh <machine-name> [--token <s1-token>] [--cpus N] [--memory N] [--disk-size N]
+#   ./deploy.sh [--token <s1-token>] [--cpus N] [--memory N] [--disk-size N]
 #
 
 set -e
@@ -18,8 +18,10 @@ NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Fixed machine name
+MACHINE_NAME="podman-machine-default"
+
 # Defaults
-MACHINE_NAME=""
 S1_TOKEN=""
 CPUS="4"
 MEMORY="4096"
@@ -29,12 +31,10 @@ INTERACTIVE=false
 
 usage() {
     cat << EOF
-Usage: $0 <machine-name> [OPTIONS]
+Usage: $0 [OPTIONS]
 
 Create a secured Podman machine with SentinelOne agent.
-
-Arguments:
-  machine-name         Name for the Podman machine
+Machine name is always 'podman-machine-default'.
 
 Options:
   --token, -t TOKEN    SentinelOne registration token (prompts if not provided)
@@ -45,24 +45,15 @@ Options:
   --help, -h           Show this help
 
 Examples:
-  $0 dev-machine
-  $0 prod --token eyJ... --cpus 8 --memory 8192
+  $0
+  $0 --token eyJ... --cpus 8 --memory 8192
 EOF
 }
 
 parse_args() {
-    for arg in "$@"; do
-        case "$arg" in
-            --help|-h) usage; exit 0 ;;
-        esac
-    done
-
-    [ $# -eq 0 ] && { usage; exit 1; }
-
-    MACHINE_NAME="$1"; shift
-
     while [ $# -gt 0 ]; do
         case "$1" in
+            --help|-h) usage; exit 0 ;;
             --token|-t) S1_TOKEN="$2"; shift 2 ;;
             --cpus) CPUS="$2"; shift 2 ;;
             --memory) MEMORY="$2"; shift 2 ;;
@@ -91,6 +82,7 @@ create_machine() {
 
     if podman machine list --format "{{.Name}}" 2>/dev/null | grep -q "^${MACHINE_NAME}$"; then
         echo -e "${YELLOW}Machine '$MACHINE_NAME' exists. Removing...${NC}"
+        podman machine stop "$MACHINE_NAME" 2>/dev/null || true
         podman machine rm -f "$MACHINE_NAME" 2>/dev/null || true
     fi
 
@@ -115,14 +107,15 @@ create_machine() {
 
 deploy_sentinelone() {
     local package_name=$(basename "$S1_PACKAGE")
+    local vm_hostname=$(hostname -s)
 
     echo -e "${BLUE}Deploying SentinelOne...${NC}"
 
-    # Set hostname based on machine name
-    echo "  Setting hostname: $MACHINE_NAME"
+    # Set hostname based on Mac hostname
+    echo "  Setting hostname: $vm_hostname"
     podman machine ssh "$MACHINE_NAME" "sudo bash -c '
-        echo \"$MACHINE_NAME\" > /etc/hostname
-        hostname \"$MACHINE_NAME\"
+        echo \"$vm_hostname\" > /etc/hostname
+        hostname \"$vm_hostname\"
     '"
 
     # Upload package
@@ -194,19 +187,21 @@ set_default_machine() {
 }
 
 print_summary() {
+    local vm_hostname=$(hostname -s)
+
     echo ""
     echo -e "${GREEN}========================================${NC}"
     echo -e "${GREEN}Deployment Complete${NC}"
     echo -e "${GREEN}========================================${NC}"
     echo ""
     echo "Machine: $MACHINE_NAME (default)"
-    echo "Hostname: $MACHINE_NAME"
+    echo "Hostname: $vm_hostname"
     echo ""
     echo "Commands:"
     echo "  podman machine ssh $MACHINE_NAME"
     echo "  podman machine stop $MACHINE_NAME"
     echo ""
-    echo "SentinelOne console - search: $MACHINE_NAME"
+    echo "SentinelOne console - search: $vm_hostname"
 }
 
 main() {

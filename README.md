@@ -28,13 +28,13 @@ cp podman-debian.raw.zst output/
 cp SentinelAgent*.deb install/
 
 # Deploy machine
-./deploy.sh my-machine --token <s1-token>
+./deploy.sh --token <s1-token>
 ```
 
 The deploy script will:
-- Create Podman machine with custom image
-- Start the machine
-- Set hostname to machine name
+- Create Podman machine named `podman-machine-default`
+- Start the machine and set as default
+- Set VM hostname to Mac hostname (for SentinelOne identification)
 - Install and register SentinelOne agent
 
 ## Files
@@ -50,7 +50,7 @@ The deploy script will:
 ## Deploy Options
 
 ```bash
-./deploy.sh <name> [options]
+./deploy.sh [options]
 
 Options:
   --token, -t TOKEN    SentinelOne token
