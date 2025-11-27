@@ -1,0 +1,25 @@
+[Unit]
+Description=Podman Machine Ready Reporter
+# Run after SSH and user sessions are ready
+After=sshd.socket sshd.service ssh.service
+After=ignition-provider.service post-ignition-setup.service
+After=systemd-user-sessions.service
+After=network-online.target
+Wants=network-online.target
+# Ignition must complete before we can signal ready
+Requires=ignition-provider.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/podman-machine-ready.sh
+StandardOutput=journal+console
+StandardError=journal+console
+# Retry a few times if vsock connection fails
+Restart=on-failure
+RestartSec=2
+StartLimitInterval=60
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

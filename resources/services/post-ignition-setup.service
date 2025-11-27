@@ -1,0 +1,17 @@
+[Unit]
+Description=Post-Ignition Setup for Podman Machine
+After=ignition-provider.service
+Requires=ignition-provider.service
+Before=podman-machine-ready.service
+ConditionPathExists=/var/lib/ignition-provider-complete
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/post-ignition-setup.sh
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+RequiredBy=podman-machine-ready.service

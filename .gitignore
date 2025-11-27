@@ -17,7 +17,7 @@ htmlcov/
 cache/
 output/
 debs/
-install/*.deb
+*.deb
 
 # Temporary files
 *.tmp
