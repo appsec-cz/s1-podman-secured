@@ -1,0 +1,23 @@
+[Unit]
+Description=Ignition Configuration Provider for Podman Machine
+DefaultDependencies=no
+Before=network-pre.target
+Before=ssh.service
+Before=systemd-user-sessions.service
+After=systemd-remount-fs.service
+After=systemd-tmpfiles-setup.service
+After=systemd-modules-load.service
+Wants=network-pre.target
+ConditionPathExists=!/var/lib/ignition-provider-complete
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 /usr/local/sbin/ignition-provider.py
+ExecStartPost=/bin/touch /var/lib/ignition-provider-complete
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+RequiredBy=ssh.service

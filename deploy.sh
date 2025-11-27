@@ -2,7 +2,8 @@
 #
 # Podman Machine Deployment Script
 #
-# Creates a Podman machine with custom image and deploys SentinelOne agent.
+# Standalone script for deploying Podman machine with custom image.
+# Can be used independently - just needs the image file in current directory.
 #
 # Usage:
 #   ./deploy.sh [--token <s1-token>] [--cpus N] [--memory N] [--disk-size N]
@@ -16,8 +17,6 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 # Fixed machine name
 MACHINE_NAME="podman-machine-default"
 
@@ -26,22 +25,26 @@ S1_TOKEN=""
 CPUS="4"
 MEMORY="4096"
 DISK_SIZE="100"
-IMAGE_PATH="$SCRIPT_DIR/output/podman-debian.raw.zst"
+IMAGE_PATH=""
 INTERACTIVE=false
 
 usage() {
     cat << EOF
 Usage: $0 [OPTIONS]
 
-Create a secured Podman machine with SentinelOne agent.
+Create a secured Podman machine with optional SentinelOne agent.
 Machine name is always 'podman-machine-default'.
+
+Looks for files in current directory:
+  - podman-debian*.raw.zst  (required)
+  - SentinelAgent*.deb      (optional)
 
 Options:
   --token, -t TOKEN    SentinelOne registration token (prompts if not provided)
   --cpus N             Number of CPUs (default: 4)
   --memory N           Memory in MB (default: 4096)
   --disk-size N        Disk size in GB (default: 100)
-  --image PATH         Path to image (default: output/podman-debian.raw.zst)
+  --image PATH         Path to image (default: auto-detect in current dir)
   --help, -h           Show this help
 
 Examples:
@@ -69,12 +72,35 @@ check_prerequisites() {
 
     command -v podman &>/dev/null || { echo -e "${RED}Error: podman not found${NC}"; exit 1; }
 
-    [ -f "$IMAGE_PATH" ] || { echo -e "${RED}Error: Image not found: $IMAGE_PATH${NC}"; exit 1; }
+    # Find image file - explicit path takes precedence
+    if [ -n "$IMAGE_PATH" ]; then
+        if [ ! -f "$IMAGE_PATH" ]; then
+            echo -e "${RED}Error: Image not found: $IMAGE_PATH${NC}"
+            exit 1
+        fi
+    else
+        # Auto-detect in current directory
+        IMAGE_PATH=$(find . -maxdepth 1 -name "podman-debian*.raw.zst" -type f 2>/dev/null | head -1)
+        if [ -z "$IMAGE_PATH" ]; then
+            echo -e "${RED}Error: No podman-debian*.raw.zst found in current directory${NC}"
+            echo ""
+            echo "Either:"
+            echo "  1. Copy the image to the current directory"
+            echo "  2. Use --image PATH to specify the image location"
+            exit 1
+        fi
+    fi
 
-    S1_PACKAGE=$(find "$SCRIPT_DIR/install" -name "SentinelAgent*.deb" -type f 2>/dev/null | head -1)
-    [ -z "$S1_PACKAGE" ] && { echo -e "${RED}Error: No SentinelAgent*.deb in install/${NC}"; exit 1; }
+    # Find SentinelOne package (optional)
+    S1_PACKAGE=$(find . -maxdepth 1 -name "SentinelAgent*.deb" -type f 2>/dev/null | head -1)
 
-    echo -e "${GREEN}OK${NC} - Image: $(basename "$IMAGE_PATH"), S1: $(basename "$S1_PACKAGE")"
+    echo -e "${GREEN}OK${NC}"
+    echo "  Image: $(basename "$IMAGE_PATH")"
+    if [ -n "$S1_PACKAGE" ]; then
+        echo "  SentinelOne: $(basename "$S1_PACKAGE")"
+    else
+        echo "  SentinelOne: not found (will skip installation)"
+    fi
 }
 
 create_machine() {
@@ -106,6 +132,12 @@ create_machine() {
 }
 
 deploy_sentinelone() {
+    # Skip if no package found
+    if [ -z "$S1_PACKAGE" ]; then
+        echo -e "${YELLOW}Skipping SentinelOne (no package found)${NC}"
+        return
+    fi
+
     local package_name=$(basename "$S1_PACKAGE")
     local vm_hostname="$(hostname -s)-podman"
 
@@ -143,6 +175,8 @@ deploy_sentinelone() {
 }
 
 prompt_for_token() {
+    # Skip if no S1 package or token already provided
+    [ -z "$S1_PACKAGE" ] && return
     [ -n "$S1_TOKEN" ] && return
 
     # Check if running interactively
@@ -195,13 +229,17 @@ print_summary() {
     echo -e "${GREEN}========================================${NC}"
     echo ""
     echo "Machine: $MACHINE_NAME (default)"
-    echo "Hostname: $vm_hostname"
+    if [ -n "$S1_PACKAGE" ]; then
+        echo "Hostname: $vm_hostname"
+    fi
     echo ""
     echo "Commands:"
     echo "  podman machine ssh $MACHINE_NAME"
     echo "  podman machine stop $MACHINE_NAME"
     echo ""
-    echo "SentinelOne console - search: $vm_hostname"
+    if [ -n "$S1_PACKAGE" ]; then
+        echo "SentinelOne console - search: $vm_hostname"
+    fi
 }
 
 main() {

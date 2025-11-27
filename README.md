@@ -20,32 +20,42 @@ make build         # Build image (~5-10 min)
 
 ### 2. Deploy Machine (on Mac)
 
-Copy the image and SentinelOne package to your Mac, then:
+Download `deploy.sh` and the image file to a directory:
 
 ```bash
-# Place files
-cp podman-debian.raw.zst output/
-cp SentinelAgent*.deb install/
+mkdir ~/podman-deploy && cd ~/podman-deploy
+
+# Copy files (from build server or shared location)
+cp /path/to/podman-debian.raw.zst .
+cp /path/to/SentinelAgent*.deb .  # Optional
 
 # Deploy machine
+chmod +x deploy.sh
 ./deploy.sh --token <s1-token>
 ```
 
 The deploy script will:
+- Auto-detect image and SentinelOne package in current directory
 - Create Podman machine named `podman-machine-default`
 - Start the machine and set as default
 - Set VM hostname to Mac hostname (for SentinelOne identification)
-- Install and register SentinelOne agent
+- Install and register SentinelOne agent (if package present)
 
-## Files
+## Project Structure
 
-| File | Description |
-|------|-------------|
-| `build.sh` | Build script (Linux) |
-| `deploy.sh` | Deploy script (Mac) |
-| `ignition-provider.py` | VM boot configuration |
-| `install/` | Place SentinelOne .deb here |
-| `output/` | Built image output |
+```
+s1-podman-secured/
+├── build.sh           # Build script (Linux)
+├── deploy.sh          # Deploy script (Mac) - standalone
+├── Makefile
+├── resources/         # VM configuration files
+│   ├── scripts/       # Shell scripts and Python
+│   ├── services/      # Systemd units
+│   └── configs/       # Configuration files
+├── output/            # Built image (gitignored)
+├── debs/              # Downloaded packages (gitignored)
+└── cache/             # Build cache (gitignored)
+```
 
 ## Deploy Options
 
@@ -57,8 +67,15 @@ Options:
   --cpus N             CPUs (default: 4)
   --memory N           Memory MB (default: 4096)
   --disk-size N        Disk GB (default: 100)
-  --image PATH         Image path
+  --image PATH         Image path (default: auto-detect)
 ```
+
+## Features
+
+- **Rosetta Support**: x86_64 binary translation on Apple Silicon
+- **Podman Desktop Compatible**: Full integration with Ignition provider
+- **SentinelOne Integration**: Automatic agent installation and registration
+- **Offline Build**: No network required during image customization
 
 ## Requirements
 
@@ -66,10 +83,11 @@ Options:
 - libguestfs-tools
 - qemu-system
 - zstd
+- debootstrap
 
 **Mac:**
 - Podman Desktop
-- SentinelOne .deb package
+- SentinelOne .deb package (optional)
 
 ## License
 
