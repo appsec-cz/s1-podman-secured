@@ -168,6 +168,7 @@ if [ ! -d "$DEBS_DIR" ] || [ -z "$(ls -A $DEBS_DIR 2>/dev/null)" ]; then
             iproute2 \
             qemu-user \
             qemu-user-binfmt \
+            podman-docker \
             cifs-utils \
             nfs-common \
             procps \
