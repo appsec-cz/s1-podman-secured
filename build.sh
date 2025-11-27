@@ -13,8 +13,9 @@ ARCH="${ARCH:-$(uname -m)}"
 IMAGE_SIZE="${IMAGE_SIZE:-10G}"
 IMAGE_NAME="${IMAGE_NAME:-podman-debian}"
 INSTALL_SENTINELONE="${INSTALL_SENTINELONE:-1}"
-SENTINELONE_TOKEN="${SENTINELONE_TOKEN:-}"  # NEW: Registration token
-VERBOSE="${VERBOSE:-0}"  # NEW: Verbose mode
+SENTINELONE_TOKEN="${SENTINELONE_TOKEN:-}"  # Registration token
+VERBOSE="${VERBOSE:-0}"  # Verbose mode
+DEBUG_BUILD="${DEBUG_BUILD:-0}"  # Debug build (enables root password, verbose logging)
 
 # Directories
 CACHE_DIR="cache"
@@ -418,6 +419,43 @@ SSHEOF
     systemctl reload ssh.service 2>/dev/null || true
 fi
 
+# Create user-specific containers.conf
+USER_CONTAINERS_DIR="$USER_HOME/.config/containers"
+mkdir -p "$USER_CONTAINERS_DIR"
+cat > "$USER_CONTAINERS_DIR/containers.conf" << 'USERCONTEOF'
+[containers]
+netns = "bridge"
+pids_limit = 0
+
+[engine]
+machine_enabled = true
+USERCONTEOF
+chown -R $USER_UID:$USER_GID "$USER_CONTAINERS_DIR"
+logger "post-ignition-setup: User containers.conf created"
+
+# Configure docker.sock symlink with correct UID
+# Check if rootful mode (Ignition may have set /etc/tmpfiles.d/podman-docker.conf)
+if [ -f /etc/tmpfiles.d/podman-docker.conf ]; then
+    # Podman machine init already created the config - verify and update if needed
+    if grep -q "/run/podman/podman.sock" /etc/tmpfiles.d/podman-docker.conf; then
+        logger "post-ignition-setup: Rootful mode detected (docker.sock -> /run/podman/podman.sock)"
+    elif grep -q "/run/user/" /etc/tmpfiles.d/podman-docker.conf; then
+        # Update with correct UID if it was set with wrong UID
+        echo "L+  /run/docker.sock   -    -    -     -   /run/user/$USER_UID/podman/podman.sock" \
+            > /etc/tmpfiles.d/podman-docker.conf
+        logger "post-ignition-setup: Updated docker.sock symlink for UID $USER_UID"
+    fi
+else
+    # Create default rootless config
+    echo "L+  /run/docker.sock   -    -    -     -   /run/user/$USER_UID/podman/podman.sock" \
+        > /etc/tmpfiles.d/podman-docker.conf
+    logger "post-ignition-setup: Created docker.sock symlink for UID $USER_UID"
+fi
+
+# Apply tmpfiles configuration
+systemd-tmpfiles --create /etc/tmpfiles.d/podman-docker.conf 2>/dev/null || true
+logger "post-ignition-setup: docker.sock symlink applied"
+
 logger "post-ignition-setup: Completed successfully"
 POSTIGNEOF
 
@@ -446,17 +484,20 @@ POSTIGNSVC
 systemctl enable post-ignition-setup.service
 echo "✓ Post-Ignition setup service installed"
 
-echo ""
-echo "=== Setting root password for serial console debug ==="
-# Set root password to 'podman' for serial console access
-echo "root:podman" | chpasswd
-echo "✓ Root password set (debug only)"
+# DEBUG_BUILD marker file - will be checked by install script
+# This is set by the outer build.sh script
+if [ -f /tmp/debug-build-marker ]; then
+    echo ""
+    echo "=== DEBUG BUILD: Setting root password ==="
+    # Set root password to 'podman' for serial console access
+    echo "root:podman" | chpasswd
+    echo "✓ Root password set to 'podman' (DEBUG BUILD ONLY)"
 
-echo ""
-echo "=== Configuring serial console logging ==="
-# Enable all systemd messages to serial console
-mkdir -p /etc/systemd/system.conf.d/
-cat > /etc/systemd/system.conf.d/50-console-logging.conf << 'CONSOLEEOF'
+    echo ""
+    echo "=== DEBUG BUILD: Configuring verbose logging ==="
+    # Enable all systemd messages to serial console
+    mkdir -p /etc/systemd/system.conf.d/
+    cat > /etc/systemd/system.conf.d/50-console-logging.conf << 'CONSOLEEOF'
 [Manager]
 # Forward all messages to console for debugging
 LogTarget=console
@@ -464,14 +505,22 @@ LogLevel=debug
 ShowStatus=yes
 CONSOLEEOF
 
-# Enable kernel and systemd console output via GRUB
-if [ -f /etc/default/grub ]; then
-    # Add console=hvc0 to kernel command line for serial console output
-    sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="/GRUB_CMDLINE_LINUX_DEFAULT="console=hvc0 systemd.log_level=debug systemd.log_target=console /' /etc/default/grub
-    update-grub 2>/dev/null || true
-fi
+    # Enable kernel and systemd console output via GRUB
+    if [ -f /etc/default/grub ]; then
+        # Add console=hvc0 to kernel command line for serial console output
+        sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="/GRUB_CMDLINE_LINUX_DEFAULT="console=hvc0 systemd.log_level=debug systemd.log_target=console /' /etc/default/grub
+        update-grub 2>/dev/null || true
+    fi
 
-echo "✓ Serial console logging enabled (kernel + systemd)"
+    echo "✓ Verbose serial console logging enabled (DEBUG BUILD ONLY)"
+    rm -f /tmp/debug-build-marker
+else
+    echo ""
+    echo "=== Production build: No root password set ==="
+    # Lock root account for security
+    passwd -l root 2>/dev/null || true
+    echo "✓ Root account locked (production build)"
+fi
 
 echo ""
 echo "=== Configuring SSH ==="
@@ -578,6 +627,35 @@ echo ""
 echo "=== Configuring Podman ==="
 # Create Podman storage configuration
 mkdir -p /etc/containers
+
+# CRITICAL: Create podman-machine marker file
+# This file is required for Podman Desktop to detect this as a Podman machine
+echo "podman-machine" > /etc/containers/podman-machine
+echo "✓ Podman machine marker file created"
+
+# Create global containers.conf with Podman machine defaults
+# These settings match Fedora CoreOS podman machine configuration
+cat > /etc/containers/containers.conf << 'CONTAINERSEOF'
+[containers]
+# Bridge networking for better compatibility
+netns = "bridge"
+# No PID limit (required for some workloads)
+pids_limit = 0
+# Use host's DNS via gateway
+dns_servers = ["192.168.127.1"]
+
+[engine]
+# Mark this as a Podman machine
+machine_enabled = true
+# Use crun as default runtime (faster than runc)
+runtime = "crun"
+
+[network]
+# Use netavark for networking (modern CNI replacement)
+network_backend = "netavark"
+CONTAINERSEOF
+echo "✓ Global containers.conf created"
+
 cat > /etc/containers/storage.conf << 'STORAGEEOF'
 [storage]
 driver = "overlay"
@@ -604,6 +682,11 @@ EOF
 # NOTE: Linger and podman.socket enablement will be done by post-ignition-setup
 # after Ignition creates the user with correct UID
 echo "✓ Podman user delegation configured (linger/socket deferred to post-ignition-setup)"
+
+# Enable podman.socket for root (rootful mode support)
+# This creates /run/podman/podman.sock when started
+systemctl enable podman.socket
+echo "✓ Podman rootful socket enabled (for rootful mode support)"
 
 # NEW: SentinelOne with token support
 if [ -f /tmp/s1.deb ]; then
@@ -748,15 +831,21 @@ echo "Customizing image..."
 VIRT_CUSTOMIZE_ARGS=(
     --add "$WORK_IMAGE"
     --hostname podman-machine
-    --root-password password:podman
     --copy-in "$DEBS_DIR:/tmp/"
     --upload "$CACHE_DIR/install.sh:/tmp/install.sh"
     --upload "ignition-provider.py:/tmp/ignition-provider.py"
 )
 
-# NEW: Verbose mode support
+# Verbose mode support
 if [ "$VERBOSE" = "1" ]; then
     VIRT_CUSTOMIZE_ARGS+=(--verbose)
+fi
+
+# Debug build support - creates marker file that install script checks
+if [ "$DEBUG_BUILD" = "1" ]; then
+    echo "DEBUG BUILD enabled - root password and verbose logging will be configured"
+    touch "$CACHE_DIR/debug-build-marker"
+    VIRT_CUSTOMIZE_ARGS+=(--upload "$CACHE_DIR/debug-build-marker:/tmp/debug-build-marker")
 fi
 
 # Add SentinelOne .deb if available
