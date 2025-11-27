@@ -692,6 +692,19 @@ class IgnitionProvider:
             except subprocess.TimeoutExpired:
                 logger.warning(f"Timeout starting mount unit '{name}'")
 
+        # Start rosetta-activation.service immediately to set up x86_64 binary translation
+        # This must run before any containers are started to register the binfmt handler
+        if name == 'rosetta-activation.service' and enabled:
+            try:
+                logger.info(f"Starting rosetta-activation.service for x86_64 translation")
+                subprocess.run(['systemctl', 'start', name], check=True, capture_output=True, timeout=30)
+                logger.info(f"Started rosetta-activation.service")
+            except subprocess.CalledProcessError as e:
+                # Not critical - may fail if rosetta virtiofs not available
+                logger.warning(f"Rosetta activation failed (may not be available): {e.stderr.decode()}")
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Timeout starting rosetta-activation.service")
+
     def extract_hostname_from_config(self, config: Dict[str, Any]) -> Optional[str]:
         """
         Extract hostname from Ignition config.

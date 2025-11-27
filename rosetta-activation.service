@@ -1,0 +1,22 @@
+[Unit]
+Description=Rosetta x86_64 Binary Translation Activation
+Documentation=https://developer.apple.com/documentation/virtualization/running-intel-binaries-in-linux-vms-with-rosetta
+# Run early, before systemd-binfmt registers QEMU handlers
+DefaultDependencies=no
+Before=systemd-binfmt.service
+After=local-fs.target
+After=proc-sys-fs-binfmt_misc.mount
+# Only run on aarch64 (ARM64) systems
+ConditionArchitecture=arm64
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/rosetta-activate.sh
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+# Service is installed but NOT enabled by default
+# Podman machine enables it via Ignition when Rosetta is requested
+WantedBy=multi-user.target
