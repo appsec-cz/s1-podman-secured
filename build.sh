@@ -672,6 +672,13 @@ mountopt = "nodev,metacopy=on"
 STORAGEEOF
 echo "✓ Podman storage configured"
 
+# CRITICAL: Create Docker compatibility symlink for SentinelOne
+# SentinelOne agent expects container storage at /var/lib/docker/overlay/
+# but Podman uses /var/lib/containers/storage/overlay/
+# This symlink allows SentinelOne to scan container filesystems
+ln -sf /var/lib/containers/storage /var/lib/docker
+echo "✓ Docker compatibility symlink created (/var/lib/docker -> /var/lib/containers/storage)"
+
 # Configure Podman for rootless operation
 mkdir -p /etc/systemd/system/user@.service.d/
 cat > /etc/systemd/system/user@.service.d/delegate.conf << 'EOF'
