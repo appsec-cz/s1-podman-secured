@@ -129,9 +129,28 @@ mkdir -p /etc/systemd/system/user@.service.d/
 install -m 644 "$RESOURCES/configs/delegate.conf" /etc/systemd/system/user@.service.d/delegate.conf
 echo "✓ User delegation configured"
 
-# Docker compatibility symlink for SentinelOne
-ln -sf /var/lib/containers/storage /var/lib/docker
-echo "✓ Docker compatibility symlink created"
+# Docker Engine for SentinelOne container visibility
+# S1 detects containers via cgroup paths - Docker uses docker-*.scope which S1 recognizes
+if dpkg-query -W -f='${Status}' docker.io 2>/dev/null | grep -q "install ok installed"; then
+    echo "=== Configuring Docker for SentinelOne visibility ==="
+
+    # Enable Docker service
+    systemctl enable docker.service
+    systemctl enable containerd.service
+
+    # Make Docker socket accessible (will be adjusted by post-ignition-setup)
+    mkdir -p /etc/systemd/system/docker.socket.d
+    cat > /etc/systemd/system/docker.socket.d/override.conf << 'EOF'
+[Socket]
+SocketMode=0666
+EOF
+
+    echo "✓ Docker enabled for S1 container visibility"
+else
+    # Fallback: Docker compatibility symlink for SentinelOne
+    ln -sf /var/lib/containers/storage /var/lib/docker
+    echo "✓ Docker compatibility symlink created (docker.io not installed)"
+fi
 
 # Enable podman.socket for root (rootful mode support)
 systemctl enable podman.socket

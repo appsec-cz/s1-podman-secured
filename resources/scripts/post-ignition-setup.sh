@@ -84,4 +84,15 @@ fi
 # Apply tmpfiles configuration (in case Ignition created new tmpfiles)
 systemd-tmpfiles --create 2>/dev/null || true
 
+# Add user to docker group for S1 container visibility
+# This allows the user to run Docker containers that S1 can detect
+if getent group docker > /dev/null 2>&1; then
+    if ! groups "$USERNAME" | grep -q '\bdocker\b'; then
+        usermod -aG docker "$USERNAME"
+        logger "post-ignition-setup: Added $USERNAME to docker group"
+    else
+        logger "post-ignition-setup: $USERNAME already in docker group"
+    fi
+fi
+
 logger "post-ignition-setup: Completed successfully"

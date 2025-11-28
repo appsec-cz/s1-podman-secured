@@ -158,7 +158,8 @@ if [ ! -d "$DEBS_DIR" ] || [ -z "$(ls -A $DEBS_DIR 2>/dev/null)" ]; then
             slirp4netns passt uidmap fuse-overlayfs crun openssh-server socat \
             dbus-user-session systemd-container iptables nftables iproute2 \
             qemu-user qemu-user-binfmt podman-docker cifs-utils nfs-common \
-            procps chrony 2>/dev/null || true
+            procps chrony \
+            docker.io containerd runc 2>/dev/null || true
     "
 
     sudo cp "$TEMP_CONTAINER"/tmp/*.deb "$DEBS_DIR/" 2>/dev/null || true
