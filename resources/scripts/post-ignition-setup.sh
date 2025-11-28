@@ -1,5 +1,10 @@
 #!/bin/bash
 # Post-Ignition setup for Podman machine
+#
+# This script runs AFTER ignition-provider.py has applied the Ignition config.
+# It only configures things that Ignition does NOT handle (sudoers, SSH forwarding).
+# It respects values already set by Ignition and does not overwrite them.
+#
 set -e
 
 logger "post-ignition-setup: Starting"
@@ -27,80 +32,56 @@ USER_HOME=$(eval echo "~$USERNAME")
 
 logger "post-ignition-setup: UID=$USER_UID GID=$USER_GID HOME=$USER_HOME"
 
-# Set up sudoers
-echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME
-chmod 0440 /etc/sudoers.d/$USERNAME
-logger "post-ignition-setup: Sudoers configured"
-
-# Set up subuid/subgid for rootless containers
-sed -i "/^$USERNAME:/d" /etc/subuid /etc/subgid 2>/dev/null || true
-echo "$USERNAME:100000:65536" >> /etc/subuid
-echo "$USERNAME:100000:65536" >> /etc/subgid
-logger "post-ignition-setup: subuid/subgid configured"
-
-# Enable lingering (if not already done by Ignition)
-if [ ! -f "/var/lib/systemd/linger/$USERNAME" ]; then
-    mkdir -p /var/lib/systemd/linger
-    touch "/var/lib/systemd/linger/$USERNAME"
-    logger "post-ignition-setup: Linger enabled"
+# Set up sudoers (Ignition doesn't do this)
+if [ ! -f "/etc/sudoers.d/$USERNAME" ]; then
+    echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME
+    chmod 0440 /etc/sudoers.d/$USERNAME
+    logger "post-ignition-setup: Sudoers configured"
+else
+    logger "post-ignition-setup: Sudoers already configured (skipping)"
 fi
 
-# Enable podman.socket for user (if not already done by Ignition)
-SOCKET_WANTS="$USER_HOME/.config/systemd/user/sockets.target.wants"
-if [ ! -L "$SOCKET_WANTS/podman.socket" ]; then
-    mkdir -p "$SOCKET_WANTS"
-    ln -sf /usr/lib/systemd/user/podman.socket "$SOCKET_WANTS/podman.socket"
-    chown -R $USERNAME:$USERNAME "$USER_HOME/.config"
-    logger "post-ignition-setup: podman.socket enabled"
+# Check subuid/subgid - only set if NOT already configured by Ignition
+# Ignition sets these from /etc/subuid and /etc/subgid files in the config
+if grep -q "^$USERNAME:" /etc/subuid 2>/dev/null; then
+    CURRENT_SUBUID=$(grep "^$USERNAME:" /etc/subuid)
+    logger "post-ignition-setup: subuid already set by Ignition: $CURRENT_SUBUID (keeping)"
+else
+    # Fallback: set default if Ignition didn't configure it
+    echo "$USERNAME:100000:1000000" >> /etc/subuid
+    logger "post-ignition-setup: subuid set (fallback): $USERNAME:100000:1000000"
 fi
 
-# Enable SSH config with StreamLocal forwarding (if not exists)
+if grep -q "^$USERNAME:" /etc/subgid 2>/dev/null; then
+    CURRENT_SUBGID=$(grep "^$USERNAME:" /etc/subgid)
+    logger "post-ignition-setup: subgid already set by Ignition: $CURRENT_SUBGID (keeping)"
+else
+    # Fallback: set default if Ignition didn't configure it
+    echo "$USERNAME:100000:1000000" >> /etc/subgid
+    logger "post-ignition-setup: subgid set (fallback): $USERNAME:100000:1000000"
+fi
+
+# Enable SSH config with StreamLocal forwarding (Ignition doesn't do this)
 if [ ! -f /etc/ssh/sshd_config.d/streamlocal.conf ]; then
     cat > /etc/ssh/sshd_config.d/streamlocal.conf << 'SSHEOF'
-# CRITICAL: Allow SSH socket forwarding for Podman Desktop
+# Allow SSH socket forwarding for Podman Desktop
 AllowStreamLocalForwarding yes
 AllowTcpForwarding yes
 StreamLocalBindUnlink yes
 SSHEOF
     logger "post-ignition-setup: SSH StreamLocal forwarding enabled"
     systemctl reload ssh.service 2>/dev/null || true
-fi
-
-# Create user-specific containers.conf
-USER_CONTAINERS_DIR="$USER_HOME/.config/containers"
-mkdir -p "$USER_CONTAINERS_DIR"
-cat > "$USER_CONTAINERS_DIR/containers.conf" << 'USERCONTEOF'
-[containers]
-netns = "bridge"
-pids_limit = 0
-
-[engine]
-machine_enabled = true
-USERCONTEOF
-chown -R $USER_UID:$USER_GID "$USER_CONTAINERS_DIR"
-logger "post-ignition-setup: User containers.conf created"
-
-# Configure docker.sock symlink with correct UID
-# Check if rootful mode (Ignition may have set /etc/tmpfiles.d/podman-docker.conf)
-if [ -f /etc/tmpfiles.d/podman-docker.conf ]; then
-    # Podman machine init already created the config - verify and update if needed
-    if grep -q "/run/podman/podman.sock" /etc/tmpfiles.d/podman-docker.conf; then
-        logger "post-ignition-setup: Rootful mode detected (docker.sock -> /run/podman/podman.sock)"
-    elif grep -q "/run/user/" /etc/tmpfiles.d/podman-docker.conf; then
-        # Update with correct UID if it was set with wrong UID
-        echo "L+  /run/docker.sock   -    -    -     -   /run/user/$USER_UID/podman/podman.sock" \
-            > /etc/tmpfiles.d/podman-docker.conf
-        logger "post-ignition-setup: Updated docker.sock symlink for UID $USER_UID"
-    fi
 else
-    # Create default rootless config
-    echo "L+  /run/docker.sock   -    -    -     -   /run/user/$USER_UID/podman/podman.sock" \
-        > /etc/tmpfiles.d/podman-docker.conf
-    logger "post-ignition-setup: Created docker.sock symlink for UID $USER_UID"
+    logger "post-ignition-setup: SSH StreamLocal already configured (skipping)"
 fi
 
-# Apply tmpfiles configuration
-systemd-tmpfiles --create /etc/tmpfiles.d/podman-docker.conf 2>/dev/null || true
-logger "post-ignition-setup: docker.sock symlink applied"
+# Note: The following are handled by Ignition and we don't touch them:
+# - /var/lib/systemd/linger/$USERNAME (from storage.files)
+# - $USER_HOME/.config/systemd/user/sockets.target.wants/podman.socket (from storage.links)
+# - $USER_HOME/.config/containers/containers.conf (from storage.files)
+# - /etc/tmpfiles.d/podman-docker.conf (from storage.files)
+
+# Apply tmpfiles configuration (in case Ignition created new tmpfiles)
+systemd-tmpfiles --create 2>/dev/null || true
 
 logger "post-ignition-setup: Completed successfully"
