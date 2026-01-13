@@ -11,6 +11,9 @@
 
 set -e
 
+# Set provider early - needed for all podman machine commands
+export CONTAINERS_MACHINE_PROVIDER=applehv
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -104,12 +107,35 @@ check_prerequisites() {
 }
 
 create_machine() {
-    export CONTAINERS_MACHINE_PROVIDER=applehv
+    # Check if machine already exists (using inspect for reliable detection)
+    if podman machine inspect "$MACHINE_NAME" &>/dev/null; then
+        echo ""
+        echo -e "${YELLOW}Machine '$MACHINE_NAME' already exists.${NC}"
 
-    if podman machine list --format "{{.Name}}" 2>/dev/null | grep -q "^${MACHINE_NAME}$"; then
-        echo -e "${YELLOW}Machine '$MACHINE_NAME' exists. Removing...${NC}"
-        podman machine stop "$MACHINE_NAME" 2>/dev/null || true
-        podman machine rm -f "$MACHINE_NAME" 2>/dev/null || true
+        # Show current machine info
+        echo ""
+        podman machine list 2>/dev/null | grep -E "^NAME|$MACHINE_NAME"
+        echo ""
+
+        if [ -t 0 ]; then
+            # Interactive mode - ask user
+            read -p "Remove existing machine and create new one? [y/N]: " answer
+            if [[ "$answer" =~ ^[Yy] ]]; then
+                echo -e "${YELLOW}Removing existing machine...${NC}"
+                podman machine stop "$MACHINE_NAME" 2>/dev/null || true
+                podman machine rm -f "$MACHINE_NAME" 2>/dev/null || true
+            else
+                echo -e "${BLUE}Keeping existing machine. Exiting.${NC}"
+                exit 0
+            fi
+        else
+            # Non-interactive mode - fail with helpful message
+            echo -e "${RED}Error: Machine already exists.${NC}"
+            echo "Run interactively to remove, or manually remove with:"
+            echo "  podman machine stop $MACHINE_NAME"
+            echo "  podman machine rm -f $MACHINE_NAME"
+            exit 1
+        fi
     fi
 
     echo -e "${BLUE}Creating machine '$MACHINE_NAME'...${NC}"
