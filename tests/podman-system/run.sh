@@ -49,6 +49,14 @@ echo "=== podman system tests ($(cat "$VENDOR/.podman-version" 2>/dev/null || ec
 machine_stash_running
 machine_create || exit 1
 
+# Try a configuration change against the suite without waiting ~50 minutes for a
+# rebuild: GUEST_PATCH points at a script that is run inside the fresh machine
+# before the tests start.
+if [ -n "${GUEST_PATCH:-}" ]; then
+    echo "Applying guest patch: $GUEST_PATCH"
+    machine_run_script < "$GUEST_PATCH"
+fi
+
 guest_podman_version=$(machine_ssh 'podman --version' 2>/dev/null | tr -d '\r')
 vendored_version=$(cat "$VENDOR/.podman-version" 2>/dev/null | tr -d 'v')
 echo "guest: $guest_podman_version, tests vendored from podman $vendored_version"
@@ -58,11 +66,23 @@ case "$guest_podman_version" in
        echo "         Set PODMAN_VERSION and re-run sync.sh to realign." ;;
 esac
 
+# The suite shells out to these. skopeo in particular is not optional: the
+# suite's own setup uses it to cache the test image, and without it every file
+# fails in setup_suite before a single test runs.
 echo "Installing test dependencies in the machine..."
-machine_ssh 'sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    bats jq socat ncat nmap gzip xz-utils tar apache2-utils openssl catatonit >/dev/null 2>&1 \
-    && echo deps-ok' 2>&1 | tail -1
+machine_run_script <<'DEPS' 2>&1 | tail -4
+set -u
+sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1
+missing=""
+for pkg in bats skopeo jq socat ncat nmap gzip xz-utils tar apache2-utils openssl catatonit; do
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$pkg" >/dev/null 2>&1 || missing="$missing $pkg"
+done
+[ -n "$missing" ] && echo "WARNING: could not install:$missing"
+for cmd in bats skopeo jq socat; do
+    command -v "$cmd" >/dev/null || echo "MISSING COMMAND: $cmd"
+done
+echo "dependencies ready"
+DEPS
 
 echo "Copying the suite into the machine..."
 machine_ssh "rm -rf $REMOTE_DIR && mkdir -p $REMOTE_DIR" >/dev/null

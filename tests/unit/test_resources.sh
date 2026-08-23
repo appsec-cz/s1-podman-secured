@@ -87,8 +87,15 @@ test_systemd_units() {
 
 test_storage_driver_is_btrfs() {
     # Regression: the image silently ran on overlay because storage.conf was shadowed.
-    assert_contains "$(cat "$ROOT/resources/configs/storage.conf")" 'driver = "btrfs"' \
-        "storage.conf selects the btrfs driver"
+    # btrfs must come first, and overlay must be there as a fallback - pinning the
+    # driver breaks every store that is not on btrfs, /tmp being tmpfs.
+    # Directives only - the comments explain what not to do and would match.
+    local conf
+    conf=$(grep -vE '^[[:space:]]*#' "$ROOT/resources/configs/storage.conf")
+    assert_contains "$conf" 'driver_priority = ["btrfs", "overlay"]' \
+        "storage.conf prefers btrfs and falls back to overlay"
+    assert_not_contains "$conf" 'driver = "btrfs"' \
+        "storage.conf does not pin the driver"
 }
 
 test_configs_survive_podman6_mount() {

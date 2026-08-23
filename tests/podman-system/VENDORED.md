@@ -58,6 +58,70 @@ touch a machine whose name does not start with `s1-test`, because **the suite
 wipes container storage** - upstream's own warning. Expect it to take a while:
 the suite is thorough and the machine is created from scratch.
 
+## Baseline: what this suite does on this image
+
+Full run against the image built on 2026-08-23, rootless, in a throwaway machine:
+
+```
+580 passed, 37 failed, 79 skipped   (about 50 minutes)
+```
+
+Podman's own banner confirms what it is testing:
+
+```
+Arch:arm64 OS:debian13 Runtime:crun Rootless:true Events:journald
+Logdriver:journald Cgroups:v2+systemd Net:netavark DB:sqlite Store:btrfs
+```
+
+The failures are not all defects. Compare a new run against this breakdown
+rather than against zero.
+
+**26 - published ports go through gvproxy (expected inside a machine).**
+`505-networking-pasta` (19), `500-networking` (6), `030-run` (1). Upstream runs
+these on a plain host where podman binds the port itself. Inside a machine podman
+delegates to gvproxy, which answers differently: `proxy already running` instead
+of `address already in use`, and `bind: can't assign requested address` when a
+test publishes on the VM's own address, which only the host side could bind.
+Podman's machine tests live elsewhere (`pkg/machine/e2e`) precisely because of
+this. Not fixable from here, and nothing is actually broken - our own
+`integration/test_runtime_behaviour.sh` checks that a published port does reach
+macOS.
+
+**5 - the storage driver.** `005-info` (3), `010-images` (1), `550-pause-process`
+(1). Three of them were caused by pinning `driver = "btrfs"`: every podman
+invocation whose store is not on btrfs failed outright, and `/tmp` is tmpfs, so
+anything using `--root` there died. Fixed by switching `storage.conf` to
+`driver_priority = ["btrfs", "overlay"]`, which keeps btrfs for the real graph
+root and falls back where btrfs cannot work. Verified with `GUEST_PATCH`.
+
+The two that remain are not ours to fix: `[005] empty string defaults` sets its
+own storage.conf and then cannot use any driver on tmpfs, and `[010] additional
+store` fails in an upstream helper that only knows overlay and vfs
+(*"Unknown storage driver 'btrfs'"*).
+
+**1 - netavark cleanup race.** `[550] rootless reexec with sig-proxy when
+rejoining userns`: *failed to delete container veth eth0: Netlink error: No such
+device*. Seen once, in teardown. Worth watching rather than chasing.
+
+**5 - not characterised yet.** `252-quadlet` (2), `600-completion` (2), and
+`[200] podman pod create - hashtag AllTheOptions`. The pod one fails on
+*"cannot set hostname when joining the pod UTS namespace"*, which reads like a
+podman version and test expectation mismatch rather than a configuration
+problem.
+
+## Trying a fix without rebuilding
+
+A rebuild takes about fifty minutes, which is a poor loop for "does this config
+change help?". `GUEST_PATCH` points at a script that runs inside the fresh
+machine before the suite starts:
+
+```bash
+GUEST_PATCH=/tmp/patch-storage.sh ./tests/podman-system/run.sh 005 010 550
+```
+
+That is how the `driver_priority` change above was verified: three failures
+turned into passes before the change was committed, let alone built.
+
 ## Keeping it honest
 
 `run.sh` compares the podman version in the guest with the pinned version and
