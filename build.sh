@@ -126,6 +126,181 @@ cp "$BASE_IMAGE" "$WORK_IMAGE"
 echo "Resizing image to $IMAGE_SIZE..."
 qemu-img resize "$WORK_IMAGE" "$IMAGE_SIZE"
 
+# Convert root filesystem to btrfs
+echo ""
+echo "Converting root filesystem to btrfs..."
+
+# Find root partition (ext4)
+ROOT_PART=$(guestfish --ro -a "$WORK_IMAGE" <<EOF
+run
+list-filesystems
+EOF
+)
+echo "Detected filesystems: $ROOT_PART"
+
+# Extract the ext4 partition device (e.g., /dev/sda1)
+ROOT_DEV=$(echo "$ROOT_PART" | grep -E 'ext[234]' | head -1 | cut -d: -f1)
+if [ -z "$ROOT_DEV" ]; then
+    echo "ERROR: Could not find ext4 root partition"
+    exit 1
+fi
+echo "Root partition: $ROOT_DEV"
+
+# Grow the partition to use all available space first
+echo "Growing partition to use full disk..."
+# virt-resize requires output file to exist, create it first
+rm -f "$WORK_IMAGE.tmp"
+qemu-img create -f qcow2 -o preallocation=off "$WORK_IMAGE.tmp" "$IMAGE_SIZE"
+if ! virt-resize --expand "$ROOT_DEV" "$WORK_IMAGE" "$WORK_IMAGE.tmp"; then
+    rm -f "$WORK_IMAGE.tmp"
+    echo "ERROR: virt-resize failed"
+    exit 1
+fi
+mv "$WORK_IMAGE.tmp" "$WORK_IMAGE"
+
+# Re-detect root partition after resize (partition numbers may change)
+echo "Re-detecting root partition after resize..."
+ROOT_PART_NEW=$(guestfish --ro -a "$WORK_IMAGE" <<EOF
+run
+list-filesystems
+EOF
+)
+echo "Filesystems after resize: $ROOT_PART_NEW"
+ROOT_DEV=$(echo "$ROOT_PART_NEW" | grep -E 'ext[234]' | head -1 | cut -d: -f1)
+if [ -z "$ROOT_DEV" ]; then
+    echo "ERROR: Could not find ext4 root partition after resize"
+    exit 1
+fi
+echo "Root partition after resize: $ROOT_DEV"
+
+# Convert ext4 to btrfs using download/convert/upload approach
+# guestfish 'sh' command requires mounted FS, but btrfs-convert needs unmounted
+echo "Running btrfs-convert..."
+PARTITION_IMG="$CACHE_DIR/partition.img"
+
+# Get the OLD UUID from ext4 filesystem BEFORE conversion
+echo "  Getting original ext4 UUID..."
+OLD_UUID=$(guestfish --ro -a "$WORK_IMAGE" <<EOF
+run
+vfs-uuid $ROOT_DEV
+EOF
+)
+OLD_UUID=$(echo "$OLD_UUID" | tr -d '[:space:]')
+echo "  Original ext4 UUID: $OLD_UUID"
+
+# Download the partition as raw image
+echo "  Downloading partition..."
+guestfish -a "$WORK_IMAGE" <<EOF
+run
+download $ROOT_DEV $PARTITION_IMG
+EOF
+
+# Convert ext4 to btrfs on the raw partition image
+echo "  Converting to btrfs..."
+btrfs-convert -p "$PARTITION_IMG"
+
+# Upload the converted partition back
+echo "  Uploading converted partition..."
+guestfish -a "$WORK_IMAGE" <<EOF
+run
+upload $PARTITION_IMG $ROOT_DEV
+EOF
+
+# Clean up partition image
+rm -f "$PARTITION_IMG"
+
+# Get new btrfs UUID and update boot config
+echo "Updating boot configuration for btrfs..."
+
+# Get the new UUID from the converted btrfs filesystem
+NEW_UUID=$(guestfish --ro -a "$WORK_IMAGE" <<EOF
+run
+vfs-uuid $ROOT_DEV
+EOF
+)
+NEW_UUID=$(echo "$NEW_UUID" | tr -d '[:space:]')
+echo "New btrfs UUID: $NEW_UUID"
+echo "Old ext4 UUID: $OLD_UUID"
+
+if [ -z "$OLD_UUID" ] || [ -z "$NEW_UUID" ]; then
+    echo "ERROR: Failed to get UUIDs (old=$OLD_UUID, new=$NEW_UUID)"
+    exit 1
+fi
+
+# virt-resize renumbers partitions: on the Debian cloud image the root partition
+# moves from gpt1 to gpt2 and the ESP becomes gpt1, so GRUB's partition hints
+# have to follow.
+ROOT_PARTNUM="${ROOT_DEV##*[a-z]}"
+echo "Root partition number: $ROOT_PARTNUM"
+
+# The EFI stub loader config is rewritten from scratch - it is a three line file
+# and this is exactly what grub-install generates. Everything else is patched
+# with guestfish 'command'; do NOT use 'sh "if [ -f ... ]; then ...; fi"' here,
+# it silently does nothing and the result is an image whose GRUB drops into the
+# rescue prompt because it still searches for the old ext4 UUID.
+ESP_GRUB_CFG="$CACHE_DIR/esp-grub.cfg"
+cat > "$ESP_GRUB_CFG" <<ESPEOF
+search.fs_uuid $NEW_UUID root 
+set prefix=(\$root)'/boot/grub'
+configfile \$prefix/grub.cfg
+ESPEOF
+
+guestfish -a "$WORK_IMAGE" -i <<EOF
+# Update fstab - filesystem type, mount options and UUID
+command "sed -i 's/ext4/btrfs/g' /etc/fstab"
+command "sed -i 's/errors=remount-ro/compress=zstd,noatime/g' /etc/fstab"
+command "sed -i 's/$OLD_UUID/$NEW_UUID/g' /etc/fstab"
+
+# Update GRUB - filesystem UUID, btrfs module, partition hints
+command "sed -i 's/$OLD_UUID/$NEW_UUID/g' /boot/grub/grub.cfg"
+command "sed -i 's/insmod ext2/insmod btrfs/g' /boot/grub/grub.cfg"
+command "sed -i 's/hd0,gpt1/hd0,gpt$ROOT_PARTNUM/g' /boot/grub/grub.cfg"
+command "sed -i 's/ahci0,gpt1/ahci0,gpt$ROOT_PARTNUM/g' /boot/grub/grub.cfg"
+command "sed -i 's/$OLD_UUID/$NEW_UUID/g' /etc/default/grub"
+
+# Replace the EFI stub loader config on the ESP
+upload $ESP_GRUB_CFG /boot/efi/EFI/debian/grub.cfg
+EOF
+rm -f "$ESP_GRUB_CFG"
+
+# Verify the bootloader actually points at the converted filesystem - a silent
+# no-op here produces an image that never boots, with no error at build time.
+echo "Verifying boot configuration..."
+for cfg in /boot/efi/EFI/debian/grub.cfg /boot/grub/grub.cfg /etc/fstab; do
+    CFG_CONTENT=$(virt-cat -a "$WORK_IMAGE" "$cfg" 2>/dev/null || true)
+    if [ -z "$CFG_CONTENT" ]; then
+        echo "ERROR: $cfg is missing or unreadable in the image"
+        exit 1
+    fi
+    if echo "$CFG_CONTENT" | grep -q "$OLD_UUID"; then
+        echo "ERROR: $cfg still references the old ext4 UUID $OLD_UUID"
+        exit 1
+    fi
+    case "$cfg" in
+        *grub.cfg)
+            if ! echo "$CFG_CONTENT" | grep -q "$NEW_UUID"; then
+                echo "ERROR: $cfg does not reference the btrfs UUID $NEW_UUID"
+                exit 1
+            fi
+            ;;
+    esac
+done
+echo "Boot configuration updated and verified"
+
+echo "Verifying btrfs conversion..."
+CONVERTED_FS=$(guestfish --ro -a "$WORK_IMAGE" <<EOF
+run
+list-filesystems
+EOF
+)
+echo "Filesystems after conversion: $CONVERTED_FS"
+
+if ! echo "$CONVERTED_FS" | grep -q "btrfs"; then
+    echo "ERROR: btrfs conversion failed"
+    exit 1
+fi
+echo "Btrfs conversion successful"
+
 # Download Podman packages (if not cached)
 if [ ! -d "$DEBS_DIR" ] || [ -z "$(ls -A $DEBS_DIR 2>/dev/null)" ]; then
     echo ""
@@ -155,10 +330,10 @@ if [ ! -d "$DEBS_DIR" ] || [ -z "$(ls -A $DEBS_DIR 2>/dev/null)" ]; then
         cd /tmp
         apt-get download \
             podman conmon containernetworking-plugins netavark aardvark-dns \
-            slirp4netns passt uidmap fuse-overlayfs crun openssh-server socat \
+            slirp4netns passt uidmap crun openssh-server socat \
             dbus-user-session systemd-container iptables nftables iproute2 \
             qemu-user qemu-user-binfmt podman-docker cifs-utils nfs-common \
-            procps chrony \
+            procps chrony btrfs-progs \
             docker.io containerd runc 2>/dev/null || true
     "
 

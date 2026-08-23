@@ -23,7 +23,8 @@ dpkg --configure -a  # Configure all packages
 
 echo ""
 echo "=== Verifying critical packages ==="
-CRITICAL_PACKAGES="uidmap podman netavark aardvark-dns passt nftables"
+# btrfs-progs required for btrfs storage driver
+CRITICAL_PACKAGES="uidmap podman netavark aardvark-dns passt nftables btrfs-progs"
 MISSING_PACKAGES=""
 
 for pkg in $CRITICAL_PACKAGES; do
@@ -100,6 +101,14 @@ mkdir -p /etc/containers
 install -m 644 "$RESOURCES/configs/containers.conf" /etc/containers/containers.conf
 install -m 644 "$RESOURCES/configs/storage.conf" /etc/containers/storage.conf
 echo "podman-machine" > /etc/containers/podman-machine
+
+# Podman 6 mounts the host's ~/.config/containers over /etc/containers inside the
+# VM (etc-containers.mount in its Ignition config), which hides everything we put
+# in /etc/containers - including storage.conf, so the storage driver silently falls
+# back to overlay. /usr/share/containers is not shadowed and is read as the base
+# configuration, so the driver is configured there as well.
+mkdir -p /usr/share/containers
+install -m 644 "$RESOURCES/configs/storage.conf" /usr/share/containers/storage.conf
 echo "✓ Podman configuration installed"
 
 # Sysctl configuration
@@ -155,6 +164,27 @@ fi
 # Enable podman.socket for root (rootful mode support)
 systemctl enable podman.socket
 echo "✓ Podman rootful socket enabled"
+
+# btrfs root filesystem post-processing
+if [ "$(stat -f -c %T /)" = "btrfs" ]; then
+    echo ""
+    echo "=== btrfs root filesystem ==="
+
+    # btrfs-convert keeps the original ext4 image in the ext2_saved subvolume so
+    # the conversion can be rolled back. The image is verified at build time, so
+    # drop it - it only pins stale metadata in the shipped image.
+    if [ -d /ext2_saved ]; then
+        if btrfs subvolume delete /ext2_saved; then
+            echo "✓ ext2_saved rollback subvolume removed"
+        else
+            echo "WARNING: could not remove /ext2_saved"
+        fi
+    fi
+
+    # btrfs-progs was installed above; make sure the initramfs can mount a btrfs root
+    update-initramfs -u -k all
+    echo "✓ initramfs regenerated with btrfs support"
+fi
 
 # DEBUG_BUILD support
 if [ -f /tmp/debug-build-marker ]; then

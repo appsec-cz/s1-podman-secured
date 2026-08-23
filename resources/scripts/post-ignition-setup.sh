@@ -81,6 +81,31 @@ fi
 # - $USER_HOME/.config/containers/containers.conf (from storage.files)
 # - /etc/tmpfiles.d/podman-docker.conf (from storage.files)
 
+# Container image trust policy
+# Podman 6 mounts the host's ~/.config/containers over /etc/containers inside the
+# VM, which hides /etc/containers/policy.json. Without a policy file podman cannot
+# pull any image ("no policy.json file found"), so put a copy in the per-user
+# locations, which the mount cannot shadow.
+if [ ! -f /etc/containers/policy.json ]; then
+    for POLICY_DIR in "$USER_HOME/.config/containers" /root/.config/containers; do
+        mkdir -p "$POLICY_DIR"
+        if [ ! -f "$POLICY_DIR/policy.json" ]; then
+            cat > "$POLICY_DIR/policy.json" << 'POLICYEOF'
+{
+    "default": [{"type": "insecureAcceptAnything"}],
+    "transports": {
+        "docker-daemon": {"": [{"type": "insecureAcceptAnything"}]}
+    }
+}
+POLICYEOF
+        fi
+    done
+    chown -R "$USER_UID:$USER_GID" "$USER_HOME/.config/containers"
+    logger "post-ignition-setup: policy.json fallback installed (/etc/containers is shadowed by host mount)"
+else
+    logger "post-ignition-setup: /etc/containers/policy.json present (skipping fallback)"
+fi
+
 # Apply tmpfiles configuration (in case Ignition created new tmpfiles)
 systemd-tmpfiles --create 2>/dev/null || true
 

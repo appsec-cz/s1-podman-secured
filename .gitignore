@@ -30,3 +30,8 @@ debs/
 venv/
 ENV/
 env/
+
+# Machine images
+*.raw
+*.raw.zst
+*.raw.zst.sha256
