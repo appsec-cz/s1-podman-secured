@@ -22,13 +22,19 @@ from typing import Dict, List, Any, Optional
 import base64
 
 # Configure logging
+# The log file is best effort: the provider runs as root at boot, where it always
+# works, but the module is also imported by the unit tests off the VM. A missing
+# or read-only /var/log must not stop the provider from running.
+_log_handlers = [logging.StreamHandler(sys.stdout)]
+try:
+    _log_handlers.append(logging.FileHandler('/var/log/ignition-provider.log'))
+except OSError:
+    pass
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('/var/log/ignition-provider.log')
-    ]
+    handlers=_log_handlers
 )
 logger = logging.getLogger('ignition-provider')
 
@@ -52,8 +58,14 @@ IGNITION_VSOCK_PORT = 1024  # Port where vfkit serves Ignition config
 # links /etc/containers/registries.conf.d/999-podman-desktop.conf to the host file
 # over the /Users virtiofs mount. Credentials in the host's auth.json are not shared
 # into the VM; the remote client sends them with the request instead.
+# immutable-root-{on,off} exist for Fedora CoreOS, whose root filesystem is
+# chattr +i. Debian's is not, so 'chattr -i /' only fails - it runs at
+# local-fs-pre.target while the root is still read only - and leaves a permanently
+# failed unit behind, which hides real failures in 'systemctl --failed'.
 SKIPPED_UNITS = {
     'etc-containers.mount': 'would hide /etc/containers provided by the image',
+    'immutable-root-off.service': 'Debian root is not immutable; chattr -i / always fails',
+    'immutable-root-on.service': 'Debian root is not immutable; nothing to set back',
 }
 
 
