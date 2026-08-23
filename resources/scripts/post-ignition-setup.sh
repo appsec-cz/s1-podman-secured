@@ -81,6 +81,21 @@ fi
 # - $USER_HOME/.config/containers/containers.conf (from storage.files)
 # - /etc/tmpfiles.d/podman-docker.conf (from storage.files)
 
+# Journal access for the user
+# podman's default log driver is journald and rootless podman reads container logs
+# back from the journal. Without membership in systemd-journal the read returns
+# nothing, so "podman logs" is silently empty - which breaks anything that waits for
+# a log line, kind most notably ("could not find a log line that matches
+# Reached target Multi-User System").
+if getent group systemd-journal > /dev/null 2>&1; then
+    if ! id -nG "$USERNAME" | tr ' ' '\n' | grep -qx systemd-journal; then
+        usermod -aG systemd-journal "$USERNAME"
+        logger "post-ignition-setup: Added $USERNAME to systemd-journal (podman logs)"
+    else
+        logger "post-ignition-setup: $USERNAME already in systemd-journal"
+    fi
+fi
+
 # Container image trust policy
 # Podman 6 mounts the host's ~/.config/containers over /etc/containers inside the
 # VM, which hides /etc/containers/policy.json. Without a policy file podman cannot

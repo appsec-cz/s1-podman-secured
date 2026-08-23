@@ -37,6 +37,26 @@ VMADDR_CID_HOST = 2  # Host CID in vsock
 IGNITION_VSOCK_PORT = 1024  # Port where vfkit serves Ignition config
 
 
+# Units from the Ignition config that must NOT be applied.
+#
+# Podman 6 ships etc-containers.mount, which bind mounts the host's
+# ~/.config/containers over /etc/containers inside the VM. That hides every file
+# the image puts there, and the guest runs podman 5.4.2 (Debian trixie), which
+# still reads them from /etc/containers:
+#   - podman-machine  -> without this marker podman does not recognise it runs in
+#     a machine, so it never asks gvproxy to forward published container ports and
+#     nothing published in the VM is reachable from the host (this breaks kind)
+#   - storage.conf, containers.conf -> storage driver and runtime settings ignored
+#   - policy.json     -> no image can be pulled at all
+# The host's registry configuration still reaches the VM: setup_registries_symlink()
+# links /etc/containers/registries.conf.d/999-podman-desktop.conf to the host file
+# over the /Users virtiofs mount. Credentials in the host's auth.json are not shared
+# into the VM; the remote client sends them with the request instead.
+SKIPPED_UNITS = {
+    'etc-containers.mount': 'would hide /etc/containers provided by the image',
+}
+
+
 class IgnitionProvider:
     """Fetches and applies Ignition configuration from vsock."""
 
@@ -617,6 +637,10 @@ class IgnitionProvider:
         name = unit_config.get('name')
         if not name:
             logger.warning("Systemd unit config missing 'name' field")
+            return
+
+        if name in SKIPPED_UNITS:
+            logger.info(f"Skipping systemd unit '{name}': {SKIPPED_UNITS[name]}")
             return
 
         enabled = unit_config.get('enabled', False)
