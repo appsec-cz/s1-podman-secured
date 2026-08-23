@@ -22,24 +22,38 @@ apt-get install -f -y || true  # Fix dependencies
 dpkg --configure -a  # Configure all packages
 
 echo ""
-echo "=== Verifying critical packages ==="
-# btrfs-progs required for btrfs storage driver
-CRITICAL_PACKAGES="uidmap podman netavark aardvark-dns passt nftables btrfs-progs"
-MISSING_PACKAGES=""
+echo "=== Verifying installed packages ==="
+# dpkg -i on the downloaded set leaves packages unconfigured whenever one of their
+# dependencies is not in the set, and the 'apt-get install -f' above then resolves
+# that by REMOVING them. That silently cost the image crun (the OCI runtime named
+# in containers.conf), chrony, cifs-utils and nfs-common - the build reported
+# success because only a handful of packages were ever verified. Every package
+# build.sh intended to install is now repaired and verified.
+if [ ! -f /tmp/debs/package-list.txt ]; then
+    echo "ERROR: /tmp/debs/package-list.txt is missing - build.sh must ship it"
+    exit 1
+fi
+PACKAGES=$(grep -vE '^[[:space:]]*(#|$)' /tmp/debs/package-list.txt | tr '\n' ' ')
+echo "Intended packages: $PACKAGES"
 
-for pkg in $CRITICAL_PACKAGES; do
+MISSING_PACKAGES=""
+APT_UPDATED=0
+
+for pkg in $PACKAGES; do
     if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed"; then
         echo "WARNING: $pkg not installed, attempting installation from repository..."
-        apt-get update -qq
+        if [ "$APT_UPDATED" = "0" ]; then
+            apt-get update -qq
+            APT_UPDATED=1
+        fi
         if ! apt-get install -y $pkg; then
             echo "ERROR: Failed to install $pkg"
-            MISSING_PACKAGES="$MISSING_PACKAGES $pkg"
         fi
     fi
 done
 
 echo "Verifying package installation..."
-for pkg in $CRITICAL_PACKAGES; do
+for pkg in $PACKAGES; do
     if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed"; then
         echo "ERROR: Package $pkg is NOT installed!"
         MISSING_PACKAGES="$MISSING_PACKAGES $pkg"
@@ -50,7 +64,7 @@ done
 
 echo ""
 echo "Verifying critical binaries..."
-CRITICAL_BINARIES="newuidmap newgidmap podman pasta"
+CRITICAL_BINARIES="newuidmap newgidmap podman pasta crun"
 MISSING_BINARIES=""
 
 for binary in $CRITICAL_BINARIES; do
@@ -104,11 +118,14 @@ echo "podman-machine" > /etc/containers/podman-machine
 
 # Podman 6 mounts the host's ~/.config/containers over /etc/containers inside the
 # VM (etc-containers.mount in its Ignition config), which hides everything we put
-# in /etc/containers - including storage.conf, so the storage driver silently falls
-# back to overlay. /usr/share/containers is not shadowed and is read as the base
-# configuration, so the driver is configured there as well.
+# in /etc/containers: storage.conf (the driver silently falls back to overlay) and
+# containers.conf (runtime, netns and dns settings never apply). /usr/share/containers
+# is not shadowed and is read as the base configuration, so both files go there too.
+# Note: a containers.conf.d drop-in under /usr/share is NOT read - it has to be the
+# file itself.
 mkdir -p /usr/share/containers
 install -m 644 "$RESOURCES/configs/storage.conf" /usr/share/containers/storage.conf
+install -m 644 "$RESOURCES/configs/containers.conf" /usr/share/containers/containers.conf
 echo "✓ Podman configuration installed"
 
 # Sysctl configuration
@@ -138,28 +155,13 @@ mkdir -p /etc/systemd/system/user@.service.d/
 install -m 644 "$RESOURCES/configs/delegate.conf" /etc/systemd/system/user@.service.d/delegate.conf
 echo "✓ User delegation configured"
 
-# Docker Engine for SentinelOne container visibility
-# S1 detects containers via cgroup paths - Docker uses docker-*.scope which S1 recognizes
-if dpkg-query -W -f='${Status}' docker.io 2>/dev/null | grep -q "install ok installed"; then
-    echo "=== Configuring Docker for SentinelOne visibility ==="
-
-    # Enable Docker service
-    systemctl enable docker.service
-    systemctl enable containerd.service
-
-    # Make Docker socket accessible (will be adjusted by post-ignition-setup)
-    mkdir -p /etc/systemd/system/docker.socket.d
-    cat > /etc/systemd/system/docker.socket.d/override.conf << 'EOF'
-[Socket]
-SocketMode=0666
-EOF
-
-    echo "✓ Docker enabled for S1 container visibility"
-else
-    # Fallback: Docker compatibility symlink for SentinelOne
-    ln -sf /var/lib/containers/storage /var/lib/docker
-    echo "✓ Docker compatibility symlink created (docker.io not installed)"
-fi
+# Docker storage compatibility symlink
+# The image ships pure podman - no Docker Engine. The Docker compatible surface is
+# podman's own API socket, which podman's Ignition config exposes as
+# /run/docker.sock -> podman.sock. This symlink only points tooling that probes for
+# the classic Docker storage directory at podman's storage.
+ln -sf /var/lib/containers/storage /var/lib/docker
+echo "✓ Docker storage compatibility symlink created"
 
 # Enable podman.socket for root (rootful mode support)
 systemctl enable podman.socket

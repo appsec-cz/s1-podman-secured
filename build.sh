@@ -19,6 +19,17 @@ SENTINELONE_TOKEN="${SENTINELONE_TOKEN:-}"
 VERBOSE="${VERBOSE:-0}"
 DEBUG_BUILD="${DEBUG_BUILD:-0}"
 
+# Packages installed into the image.
+# Single source of truth: the same list is written into the image as
+# /tmp/debs/package-list.txt so install.sh can repair and verify against it.
+# Pure podman - no Docker Engine. docker.io also conflicts with podman-docker,
+# which is why podman-docker never installed while docker.io was on this list.
+PACKAGES="podman conmon containernetworking-plugins netavark aardvark-dns \
+slirp4netns passt uidmap crun openssh-server socat \
+dbus-user-session systemd-container iptables nftables iproute2 \
+qemu-user qemu-user-binfmt podman-docker cifs-utils nfs-common \
+procps chrony btrfs-progs"
+
 # Directories
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CACHE_DIR="$SCRIPT_DIR/cache"
@@ -328,17 +339,12 @@ if [ ! -d "$DEBS_DIR" ] || [ -z "$(ls -A $DEBS_DIR 2>/dev/null)" ]; then
     sudo chroot "$TEMP_CONTAINER" /bin/bash -c "
         apt-get update
         cd /tmp
-        apt-get download \
-            podman conmon containernetworking-plugins netavark aardvark-dns \
-            slirp4netns passt uidmap crun openssh-server socat \
-            dbus-user-session systemd-container iptables nftables iproute2 \
-            qemu-user qemu-user-binfmt podman-docker cifs-utils nfs-common \
-            procps chrony btrfs-progs \
-            docker.io containerd runc 2>/dev/null || true
+        apt-get download $PACKAGES 2>/dev/null || true
     "
 
     sudo cp "$TEMP_CONTAINER"/tmp/*.deb "$DEBS_DIR/" 2>/dev/null || true
     sudo chown -R $(id -u):$(id -g) "$DEBS_DIR"
+    printf '%s\n' $PACKAGES > "$DEBS_DIR/package-list.txt"
 
     PKG_COUNT=$(ls -1 "$DEBS_DIR"/*.deb 2>/dev/null | wc -l)
     if [ "$PKG_COUNT" -eq 0 ]; then
@@ -355,6 +361,7 @@ else
     echo ""
     echo "Using cached packages in $DEBS_DIR/"
     PKG_COUNT=$(ls -1 "$DEBS_DIR"/*.deb 2>/dev/null | wc -l)
+    printf '%s\n' $PACKAGES > "$DEBS_DIR/package-list.txt"
     echo "✓ Using $PKG_COUNT cached packages"
 fi
 

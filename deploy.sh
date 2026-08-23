@@ -157,29 +157,6 @@ create_machine() {
     echo -e "${GREEN}Machine is running${NC}"
 }
 
-configure_docker_for_s1() {
-    echo -e "${BLUE}Configuring Docker for SentinelOne visibility...${NC}"
-
-    # Verify Docker is available and start it
-    podman machine ssh "$MACHINE_NAME" "sudo bash -c '
-        if command -v docker &>/dev/null; then
-            # Ensure Docker service is running
-            systemctl start docker 2>/dev/null || true
-
-            # Verify Docker is working
-            if docker info &>/dev/null; then
-                echo \"Docker is running\"
-            else
-                echo \"Docker failed to start\" >&2
-            fi
-        else
-            echo \"Docker not installed in image\"
-        fi
-    '"
-
-    echo -e "${GREEN}Done${NC}"
-}
-
 deploy_sentinelone() {
     # Skip if no package found
     if [ -z "$S1_PACKAGE" ]; then
@@ -287,12 +264,15 @@ print_summary() {
     echo "  podman machine stop $MACHINE_NAME"
     echo ""
     if [ -n "$S1_PACKAGE" ]; then
-        echo -e "${YELLOW}SentinelOne Container Visibility:${NC}"
-        echo "  For S1 to see containers, use Docker:"
-        echo "  podman machine ssh $MACHINE_NAME 'docker run -d nginx'"
+        echo -e "${YELLOW}SentinelOne:${NC}"
+        echo "  The agent sees process and file activity from containers"
+        echo "  (execs, mounts, and files inside image layers are scanned)."
         echo ""
-        echo "  Podman containers are NOT visible to S1."
-        echo "  Docker containers ARE visible to S1."
+        echo "  Whether it labels them with container context is unverified:"
+        echo "  the agent knows docker/containerd/kubernetes, not podman."
+        echo "  Podman does expose a Docker compatible API at /run/docker.sock,"
+        echo "  which is the endpoint the agent has built in - confirm with"
+        echo "  SentinelOne support whether their Linux agent uses it."
         echo ""
         echo "SentinelOne console - search: $vm_hostname"
     fi
@@ -309,7 +289,6 @@ main() {
     prompt_for_token
     cleanup_old_machines
     create_machine
-    configure_docker_for_s1
     deploy_sentinelone
     set_default_machine
     print_summary

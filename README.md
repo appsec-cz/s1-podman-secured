@@ -75,7 +75,7 @@ Options:
 - **Rosetta Support**: x86_64 binary translation on Apple Silicon
 - **Podman Desktop Compatible**: Full integration with Ignition provider
 - **SentinelOne Integration**: Automatic agent installation and registration
-- **Offline Build**: No network required during image customization
+- **Reproducible Build**: Packages are downloaded up front; the build verifies every intended package made it into the image and repairs from the Debian mirror if not
 
 ## Requirements
 
