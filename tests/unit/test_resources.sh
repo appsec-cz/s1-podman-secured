@@ -159,8 +159,8 @@ test_rosetta_is_enabled_at_init() {
     # containers would silently fall back to qemu emulation.
     local deploy
     deploy=$(cat "$ROOT/deploy.sh")
-    assert_contains "$deploy" "rosetta = true" "deploy.sh turns Rosetta on for the machine"
-    assert_contains "$deploy" "CONTAINERS_CONF=" "deploy.sh passes the config to podman machine init"
+    assert_contains "$deploy" "rosetta = true" "deploy.sh turns Rosetta on"
+    assert_contains "$deploy" "containers.conf" "deploy.sh writes the setting where podman re-reads it on every start"
 
     # And the guest keeps qemu as the fallback when Rosetta is not there.
     assert_contains "$(cat "$ROOT/resources/scripts/rosetta-activate.sh")" "QEMU fallback" \

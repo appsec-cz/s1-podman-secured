@@ -107,37 +107,39 @@ check_prerequisites() {
 }
 
 # Rosetta translates x86_64 binaries natively on Apple Silicon; without it the
-# image falls back to qemu-user emulation, which works but is far slower. Podman
-# decides this at init time from containers.conf, and the default leaves it off,
-# so build a config for this one command: a copy of the user's own, with
-# [machine] rosetta = true. Their settings are preserved and nothing on the host
-# is modified permanently.
-prepare_rosetta_config() {
-    ROSETTA_CONF=""
-
+# image falls back to qemu-user emulation, which works but is far slower.
+#
+# This has to go into the real containers.conf, not a temporary one passed to
+# init: podman re-derives the setting from containers.conf on every machine
+# start and rewrites the machine config, so a value that is only present at init
+# time is silently turned off again by the next plain "podman machine start" -
+# including the ones Podman Desktop issues.
+enable_rosetta() {
     if [ "$(uname -m)" != "arm64" ]; then
         echo -e "${YELLOW}Not Apple Silicon - x86_64 containers will use QEMU emulation${NC}"
         return 0
     fi
 
-    local src="$HOME/.config/containers/containers.conf"
-    ROSETTA_CONF=$(mktemp -t s1-containers-conf) || { ROSETTA_CONF=""; return 0; }
+    local conf="$HOME/.config/containers/containers.conf"
+    mkdir -p "$(dirname "$conf")"
+    [ -f "$conf" ] || : > "$conf"
 
-    if [ -f "$src" ]; then
-        cp "$src" "$ROSETTA_CONF"
-    else
-        : > "$ROSETTA_CONF"
+    if grep -qE '^[[:space:]]*rosetta[[:space:]]*=[[:space:]]*true' "$conf"; then
+        echo -e "${BLUE}Rosetta already enabled in $conf${NC}"
+        return 0
     fi
 
-    if grep -qE '^[[:space:]]*rosetta[[:space:]]*=' "$ROSETTA_CONF"; then
-        sed -i '' -E 's/^[[:space:]]*rosetta[[:space:]]*=.*/rosetta = true/' "$ROSETTA_CONF"
-    elif grep -qE '^\[machine\]' "$ROSETTA_CONF"; then
-        sed -i '' -E 's/^\[machine\]/[machine]\'$'\n''rosetta = true/' "$ROSETTA_CONF"
+    cp "$conf" "${conf}.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+
+    if grep -qE '^[[:space:]]*rosetta[[:space:]]*=' "$conf"; then
+        sed -i '' -E 's/^[[:space:]]*rosetta[[:space:]]*=.*/rosetta = true/' "$conf"
+    elif grep -qE '^\[machine\]' "$conf"; then
+        sed -i '' -E 's/^\[machine\]/[machine]\'$'\n''rosetta = true/' "$conf"
     else
-        printf '\n[machine]\nrosetta = true\n' >> "$ROSETTA_CONF"
+        printf '\n[machine]\nrosetta = true\n' >> "$conf"
     fi
 
-    echo -e "${BLUE}Rosetta enabled for x86_64 translation${NC}"
+    echo -e "${BLUE}Rosetta enabled in $conf (a backup of the previous file is next to it)${NC}"
 }
 
 create_machine() {
@@ -173,8 +175,8 @@ create_machine() {
     fi
 
     echo -e "${BLUE}Creating machine '$MACHINE_NAME'...${NC}"
-    prepare_rosetta_config
-    CONTAINERS_CONF="${ROSETTA_CONF:-${CONTAINERS_CONF:-}}" podman machine init "$MACHINE_NAME" \
+    enable_rosetta
+    podman machine init "$MACHINE_NAME" \
         --image "$IMAGE_PATH" \
         --cpus "$CPUS" \
         --memory "$MEMORY" \
@@ -189,7 +191,15 @@ create_machine() {
         sleep 2
     done
 
-    [ -n "${ROSETTA_CONF:-}" ] && rm -f "$ROSETTA_CONF"
+    # Confirm what podman actually did with it. A silent miss here means every
+    # x86_64 container falls back to qemu emulation.
+    if [ "$(uname -m)" = "arm64" ]; then
+        if [ "$(podman machine inspect "$MACHINE_NAME" --format '{{.Rosetta}}' 2>/dev/null)" = "true" ]; then
+            echo -e "${GREEN}Rosetta is active for this machine${NC}"
+        else
+            echo -e "${YELLOW}WARNING: Rosetta did not take effect - x86_64 containers will use QEMU emulation${NC}"
+        fi
+    fi
 
     echo -e "${GREEN}Machine is running${NC}"
 }

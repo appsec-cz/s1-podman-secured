@@ -1,9 +1,13 @@
 [Unit]
 Description=Rosetta x86_64 Binary Translation Activation
 Documentation=https://developer.apple.com/documentation/virtualization/running-intel-binaries-in-linux-vms-with-rosetta
-# Run early, before systemd-binfmt registers QEMU handlers
+# Run AFTER systemd-binfmt, not before it. systemd-binfmt flushes the whole
+# binfmt_misc table and re-registers only what it finds in /usr/lib/binfmt.d,
+# so a Rosetta handler registered before it is wiped a few milliseconds later -
+# the service logs success and x86_64 binaries still go to QEMU.
 DefaultDependencies=no
-Before=systemd-binfmt.service
+Wants=systemd-binfmt.service
+After=systemd-binfmt.service
 After=local-fs.target
 After=proc-sys-fs-binfmt_misc.mount
 # Only run on aarch64 (ARM64) systems
