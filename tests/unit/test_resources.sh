@@ -146,6 +146,13 @@ test_package_list() {
         "install.sh verifies against the shipped package list"
 }
 
+test_missing_sentinelone_fails_the_build() {
+    # The agent is the point of the image; a build that quietly omits it produces
+    # something that passes every other check and does nothing useful.
+    assert_contains "$(cat "$ROOT/build.sh")" "but no SentinelAgent*.deb in" \
+        "build.sh fails when the agent is requested but absent"
+}
+
 test_kernel_comes_from_backports() {
     local install
     install=$(cat "$ROOT/resources/install.sh")

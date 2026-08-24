@@ -407,7 +407,12 @@ if [ "$INSTALL_SENTINELONE" = "1" ]; then
             VIRT_CUSTOMIZE_ARGS+=(--upload "$CACHE_DIR/sentinelone-token:/tmp/sentinelone-token")
         fi
     else
-        echo "No SentinelOne package found in project root"
+        # The agent is the reason this image exists. Silently building without it
+        # produces an image that looks fine and is missing its whole point - set
+        # INSTALL_SENTINELONE=0 to say you meant it.
+        echo "ERROR: INSTALL_SENTINELONE=1 but no SentinelAgent*.deb in $SCRIPT_DIR"
+        echo "       Put the agent package there, or build with INSTALL_SENTINELONE=0"
+        exit 1
     fi
 fi
 
