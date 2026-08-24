@@ -149,6 +149,28 @@ test_init_process_support() {
     assert_contains "$out" "INIT_OK" "containers can run with --init"
 }
 
+test_x86_64_translation() {
+    # Rosetta translates natively on Apple Silicon and qemu-user emulates when it
+    # is absent. Either way an amd64 container has to run; which one did the work
+    # is worth reporting, because the difference is large.
+    local out
+    out=$(guest "podman run --rm --arch amd64 $TEST_IMG uname -m" 2>&1 | tr -d '\r')
+    assert_contains "$out" "x86_64" "an amd64 container runs on this machine"
+
+    local handlers
+    handlers=$(guest 'ls /proc/sys/fs/binfmt_misc/ 2>/dev/null | grep -E "^(rosetta|qemu-x86_64)$" | tr "\n" " "' 2>/dev/null | tr -d '\r')
+    if printf '%s' "$handlers" | grep -q rosetta; then
+        t_pass "Rosetta is handling x86_64 binaries"
+        local qemu_state
+        qemu_state=$(guest 'cat /proc/sys/fs/binfmt_misc/qemu-x86_64 2>/dev/null | head -1' 2>/dev/null | tr -d '\r')
+        t_info "qemu-x86_64 handler: ${qemu_state:-not registered} (fallback)"
+    else
+        t_skip "Rosetta is handling x86_64 binaries" \
+            "only qemu-user is registered - Rosetta is off for this machine, or the host is not Apple Silicon"
+        assert_contains "$handlers" "qemu-x86_64" "qemu-user is registered as the fallback"
+    fi
+}
+
 test_rootful_containers() {
     local out
     out=$(guest "sudo podman run --rm $TEST_IMG echo ROOTFUL_OK" 2>&1 | tr -d '\r')

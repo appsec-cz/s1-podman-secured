@@ -46,6 +46,28 @@ test_disk_was_grown() {
     fi
 }
 
+test_kernel_from_backports() {
+    # The image installs the backports kernel and purges the stable one, so there
+    # is exactly one kernel and it is the newer one.
+    local release major
+    release=$(guest 'uname -r' 2>/dev/null | tr -d '\r')
+    major=${release%%.*}
+    if [ "${major:-0}" -ge 7 ]; then
+        t_pass "running the backports kernel ($release)"
+    else
+        t_fail "running the backports kernel" "still on $release - did the backports install fail during the build?"
+    fi
+
+    local count
+    count=$(guest 'ls /boot/vmlinuz-* 2>/dev/null | wc -l' 2>/dev/null | tr -d '\r ')
+    assert_eq "1" "$count" "the image carries exactly one kernel"
+
+    # eBPF CO-RE needs BTF, and SentinelOne's sensors depend on it.
+    local btf
+    btf=$(guest 'test -r /sys/kernel/btf/vmlinux && echo yes || echo no' 2>/dev/null | tr -d '\r')
+    assert_eq "yes" "$btf" "the kernel exposes BTF for eBPF programs"
+}
+
 test_storage_driver() {
     # Regression: podman fell back to overlay because podman 6 mounted the host's
     # config over /etc/containers and hid storage.conf.

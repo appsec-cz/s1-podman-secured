@@ -87,6 +87,77 @@ fi
 echo "✓ All critical packages and binaries verified"
 
 echo ""
+echo "=== Installing a newer kernel from backports ==="
+# Debian stable ships 6.12; backports carries the kernel from the next release.
+# The image keeps exactly one kernel: the new one is installed, the stable one is
+# purged, so this costs nothing in size. Installing a kernel regenerates
+# /boot/grub/grub.cfg, which is why build.sh verifies the bootloader again after
+# this script has run.
+#
+# The trade this makes: backports is not covered by Debian's security team, so
+# kernel fixes arrive when the backport is refreshed rather than on the security
+# team's schedule.
+DEB_ARCH=$(dpkg --print-architecture)
+
+# Kernel packages come in several parts, and the naming differs between the
+# stable and the backports kernel: linux-image-<ver>, its -unsigned counterpart,
+# and on newer kernels linux-modules-<ver> and linux-binary-<ver>. Match on the
+# version instead of guessing package names, or the old kernel's 169 MB
+# -unsigned package stays behind.
+kernel_packages() {
+    dpkg-query -Wf '${Package}\n' \
+        'linux-image-[0-9]*' 'linux-modules-[0-9]*' 'linux-binary-[0-9]*' 2>/dev/null | sort -u
+}
+
+OLD_KERNEL_PKGS=$(kernel_packages | tr '\n' ' ')
+echo "Kernel packages before: ${OLD_KERNEL_PKGS:-none}"
+
+echo 'deb http://deb.debian.org/debian trixie-backports main' > /etc/apt/sources.list.d/backports.list
+apt-get update -qq
+
+if apt-get install -y -t trixie-backports "linux-image-$DEB_ARCH"; then
+    # Highest version wins; ignore the -unsigned variants when picking it.
+    NEW_VERSION=$(kernel_packages | grep '^linux-image-' | grep -v -- '-unsigned$' \
+        | sed 's/^linux-image-//' | sort -V | tail -1)
+
+    if [ -z "$NEW_VERSION" ]; then
+        echo "ERROR: no versioned kernel package after the backports install"
+        exit 1
+    fi
+    echo "Kernel after: $NEW_VERSION"
+
+    for pkg in $(kernel_packages); do
+        case "$pkg" in
+            *"$NEW_VERSION"*) ;;
+            *) echo "Removing superseded kernel package $pkg"
+               apt-get purge -y "$pkg" ;;
+        esac
+    done
+    apt-get autoremove -y --purge
+
+    REMAINING=$(kernel_packages | tr '\n' ' ')
+    echo "Kernel packages after: $REMAINING"
+    case "$REMAINING" in
+        *"$NEW_VERSION"*) echo "✓ Kernel replaced with the backports build" ;;
+        *) echo "ERROR: the backports kernel is not installed after cleanup"; exit 1 ;;
+    esac
+
+    VMLINUZ_COUNT=$(ls /boot/vmlinuz-* 2>/dev/null | wc -l)
+    if [ "$VMLINUZ_COUNT" -ne 1 ]; then
+        echo "ERROR: expected exactly one kernel in /boot, found $VMLINUZ_COUNT"
+        ls -la /boot/vmlinuz-* 2>/dev/null || true
+        exit 1
+    fi
+else
+    # Not fatal: an image on the stable kernel still works, and failing the whole
+    # build because a backport moved would be worse than shipping 6.12.
+    echo "WARNING: could not install the backports kernel, keeping ${OLD_KERNEL_PKGS:-the stable kernel}"
+fi
+
+rm -f /etc/apt/sources.list.d/backports.list
+apt-get update -qq
+
+echo ""
 echo "=== Installing scripts ==="
 install -m 755 "$RESOURCES/scripts/ignition-provider.py" /usr/local/sbin/ignition-provider.py
 install -m 755 "$RESOURCES/scripts/post-ignition-setup.sh" /usr/local/bin/post-ignition-setup.sh

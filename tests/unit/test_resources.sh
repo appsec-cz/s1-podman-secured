@@ -146,6 +146,27 @@ test_package_list() {
         "install.sh verifies against the shipped package list"
 }
 
+test_kernel_comes_from_backports() {
+    local install
+    install=$(cat "$ROOT/resources/install.sh")
+    assert_contains "$install" "trixie-backports" "install.sh pulls a kernel from backports"
+    assert_contains "$install" "apt-get purge" "install.sh purges the superseded kernel"
+    assert_contains "$install" 'linux-image-$DEB_ARCH' "the kernel package is architecture independent"
+}
+
+test_rosetta_is_enabled_at_init() {
+    # Rosetta is decided at init time; podman leaves it off by default, so x86_64
+    # containers would silently fall back to qemu emulation.
+    local deploy
+    deploy=$(cat "$ROOT/deploy.sh")
+    assert_contains "$deploy" "rosetta = true" "deploy.sh turns Rosetta on for the machine"
+    assert_contains "$deploy" "CONTAINERS_CONF=" "deploy.sh passes the config to podman machine init"
+
+    # And the guest keeps qemu as the fallback when Rosetta is not there.
+    assert_contains "$(cat "$ROOT/resources/scripts/rosetta-activate.sh")" "QEMU fallback" \
+        "the guest falls back to qemu when Rosetta is unavailable"
+}
+
 test_bootloader_verification_present() {
     # Regression: the build reported success while producing an image whose GRUB
     # still searched for the old ext4 UUID.
@@ -155,6 +176,12 @@ test_bootloader_verification_present() {
         "build.sh verifies the bootloader after conversion"
     assert_contains "$build" "still references the old ext4 UUID" \
         "build.sh fails when a boot config keeps the old UUID"
+
+    # Installing a kernel regenerates grub.cfg, so verifying once before the
+    # package installation is not enough any more.
+    local calls
+    calls=$(printf '%s' "$build" | grep -c '^verify_boot_config ')
+    assert_eq "2" "$calls" "the bootloader is verified both after conversion and after customization"
 }
 
 run_tests

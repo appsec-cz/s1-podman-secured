@@ -106,6 +106,40 @@ check_prerequisites() {
     fi
 }
 
+# Rosetta translates x86_64 binaries natively on Apple Silicon; without it the
+# image falls back to qemu-user emulation, which works but is far slower. Podman
+# decides this at init time from containers.conf, and the default leaves it off,
+# so build a config for this one command: a copy of the user's own, with
+# [machine] rosetta = true. Their settings are preserved and nothing on the host
+# is modified permanently.
+prepare_rosetta_config() {
+    ROSETTA_CONF=""
+
+    if [ "$(uname -m)" != "arm64" ]; then
+        echo -e "${YELLOW}Not Apple Silicon - x86_64 containers will use QEMU emulation${NC}"
+        return 0
+    fi
+
+    local src="$HOME/.config/containers/containers.conf"
+    ROSETTA_CONF=$(mktemp -t s1-containers-conf) || { ROSETTA_CONF=""; return 0; }
+
+    if [ -f "$src" ]; then
+        cp "$src" "$ROSETTA_CONF"
+    else
+        : > "$ROSETTA_CONF"
+    fi
+
+    if grep -qE '^[[:space:]]*rosetta[[:space:]]*=' "$ROSETTA_CONF"; then
+        sed -i '' -E 's/^[[:space:]]*rosetta[[:space:]]*=.*/rosetta = true/' "$ROSETTA_CONF"
+    elif grep -qE '^\[machine\]' "$ROSETTA_CONF"; then
+        sed -i '' -E 's/^\[machine\]/[machine]\'$'\n''rosetta = true/' "$ROSETTA_CONF"
+    else
+        printf '\n[machine]\nrosetta = true\n' >> "$ROSETTA_CONF"
+    fi
+
+    echo -e "${BLUE}Rosetta enabled for x86_64 translation${NC}"
+}
+
 create_machine() {
     # Check if machine already exists (using inspect for reliable detection)
     if podman machine inspect "$MACHINE_NAME" &>/dev/null; then
@@ -139,7 +173,8 @@ create_machine() {
     fi
 
     echo -e "${BLUE}Creating machine '$MACHINE_NAME'...${NC}"
-    podman machine init "$MACHINE_NAME" \
+    prepare_rosetta_config
+    CONTAINERS_CONF="${ROSETTA_CONF:-${CONTAINERS_CONF:-}}" podman machine init "$MACHINE_NAME" \
         --image "$IMAGE_PATH" \
         --cpus "$CPUS" \
         --memory "$MEMORY" \
@@ -153,6 +188,8 @@ create_machine() {
         podman machine ssh "$MACHINE_NAME" "echo ok" &>/dev/null && break
         sleep 2
     done
+
+    [ -n "${ROSETTA_CONF:-}" ] && rm -f "$ROSETTA_CONF"
 
     echo -e "${GREEN}Machine is running${NC}"
 }

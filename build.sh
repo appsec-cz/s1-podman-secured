@@ -276,27 +276,38 @@ rm -f "$ESP_GRUB_CFG"
 
 # Verify the bootloader actually points at the converted filesystem - a silent
 # no-op here produces an image that never boots, with no error at build time.
-echo "Verifying boot configuration..."
-for cfg in /boot/efi/EFI/debian/grub.cfg /boot/grub/grub.cfg /etc/fstab; do
-    CFG_CONTENT=$(virt-cat -a "$WORK_IMAGE" "$cfg" 2>/dev/null || true)
-    if [ -z "$CFG_CONTENT" ]; then
-        echo "ERROR: $cfg is missing or unreadable in the image"
-        exit 1
-    fi
-    if echo "$CFG_CONTENT" | grep -q "$OLD_UUID"; then
-        echo "ERROR: $cfg still references the old ext4 UUID $OLD_UUID"
-        exit 1
-    fi
-    case "$cfg" in
-        *grub.cfg)
-            if ! echo "$CFG_CONTENT" | grep -q "$NEW_UUID"; then
-                echo "ERROR: $cfg does not reference the btrfs UUID $NEW_UUID"
-                exit 1
-            fi
-            ;;
-    esac
-done
-echo "Boot configuration updated and verified"
+#
+# This runs twice: once now, and again after virt-customize, because installing a
+# kernel triggers update-grub, which regenerates /boot/grub/grub.cfg from scratch.
+# Verifying only before the package installation would leave exactly the failure
+# this check exists to catch.
+verify_boot_config() {
+    local when="$1"
+    echo "Verifying boot configuration ($when)..."
+    local cfg CFG_CONTENT
+    for cfg in /boot/efi/EFI/debian/grub.cfg /boot/grub/grub.cfg /etc/fstab; do
+        CFG_CONTENT=$(virt-cat -a "$WORK_IMAGE" "$cfg" 2>/dev/null || true)
+        if [ -z "$CFG_CONTENT" ]; then
+            echo "ERROR: $cfg is missing or unreadable in the image"
+            exit 1
+        fi
+        if echo "$CFG_CONTENT" | grep -q "$OLD_UUID"; then
+            echo "ERROR: $cfg still references the old ext4 UUID $OLD_UUID"
+            exit 1
+        fi
+        case "$cfg" in
+            *grub.cfg)
+                if ! echo "$CFG_CONTENT" | grep -q "$NEW_UUID"; then
+                    echo "ERROR: $cfg does not reference the btrfs UUID $NEW_UUID"
+                    exit 1
+                fi
+                ;;
+        esac
+    done
+    echo "Boot configuration updated and verified ($when)"
+}
+
+verify_boot_config "after conversion"
 
 echo "Verifying btrfs conversion..."
 CONVERTED_FS=$(guestfish --ro -a "$WORK_IMAGE" <<EOF
@@ -407,6 +418,19 @@ VIRT_CUSTOMIZE_ARGS+=(
 )
 
 virt-customize "${VIRT_CUSTOMIZE_ARGS[@]}"
+
+# install.sh replaces the kernel, which regenerates grub.cfg. Check it again.
+verify_boot_config "after customization"
+
+INSTALLED_KERNEL=$(virt-ls -a "$WORK_IMAGE" /boot 2>/dev/null | grep '^vmlinuz-' | sed 's/^vmlinuz-//' | sort -V | tr '\n' ' ')
+echo "Kernels in the image: ${INSTALLED_KERNEL:-none}"
+if [ -z "$INSTALLED_KERNEL" ]; then
+    echo "ERROR: no kernel in the image"
+    exit 1
+fi
+if [ "$(printf '%s' "$INSTALLED_KERNEL" | wc -w)" -gt 1 ]; then
+    echo "WARNING: more than one kernel is installed, the image is larger than it needs to be"
+fi
 
 # Extract install log if verbose
 if [ "$VERBOSE" = "1" ]; then
