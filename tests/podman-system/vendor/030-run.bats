@@ -2,8 +2,9 @@
 
 load helpers
 load helpers.network
+load helpers.registry
 
-# bats test_tags=distro-integration, ci:parallel
+# bats test_tags=ci:parallel
 @test "podman run - basic tests" {
     rand=$(random_string 30)
 
@@ -58,6 +59,25 @@ echo $rand        |   0 | $rand
 }
 
 # bats test_tags=ci:parallel
+@test "podman run - containers.conf runtime options" {
+    skip_if_remote "requires local containers.conf"
+
+    containersConf=$PODMAN_TMPDIR/containers.conf
+    cat >$containersConf <<EOF
+[engine]
+runtime="$(podman_runtime)"
+
+[engine.runtimes_flags]
+$(podman_runtime) = [
+  "invalidflag",
+]
+EOF
+
+    CONTAINERS_CONF="$containersConf" run_podman 126 run --rm $IMAGE
+    is "$output" ".*invalidflag" "failed when passing undefined flags to the runtime"
+}
+
+# bats test_tags=ci:parallel
 @test "podman run --memory=0 runtime option" {
     run_podman run --memory=0 --rm $IMAGE echo hello
     if is_rootless && ! is_cgroupsv2; then
@@ -77,7 +97,7 @@ echo $rand        |   0 | $rand
     echo "$content" > $PODMAN_TMPDIR/tempfile
 
     run_podman run --rm -i --preserve-fds=2 $IMAGE sh -c "cat <&4" 4<$PODMAN_TMPDIR/tempfile
-    is "$output" "$content" "container read input from fd 4"
+    assert "$output" =~ "$content" "container read input from fd 4"
 }
 
 # 'run --preserve-fd' passes a list of additional file descriptors into the container
@@ -104,7 +124,6 @@ echo $rand        |   0 | $rand
 @test "podman run - uidmapping has no /sys/kernel mounts" {
     skip_if_cgroupsv1 "run --uidmap fails on cgroups v1 (issue 15025, wontfix)"
     skip_if_rootless "cannot umount as rootless"
-    skip_if_remote "TODO Fix this for remote case"
 
     run_podman run --rm --uidmap 0:100:10000 $IMAGE mount
     assert "$output" !~ /sys/kernel "unwanted /sys/kernel in 'mount' output"
@@ -351,7 +370,7 @@ echo $rand        |   0 | $rand
 }
 
 # #6829 : add username to /etc/passwd inside container if --userns=keep-id
-# bats test_tags=distro-integration, ci:parallel
+# bats test_tags=ci:parallel
 @test "podman run : add username to /etc/passwd if --userns=keep-id" {
     skip_if_not_rootless "--userns=keep-id only works in rootless mode"
     # Default: always run as root
@@ -375,7 +394,7 @@ echo $rand        |   0 | $rand
         tests="
                 |  /home/podman /home/podman /home/podman    | no vol mount
 /home/x$whoami  |  /home/podman /home/podman /home/podman    | bad vol mount
-/home/$whoami   |  /home/podman /home/$whoami /home/$whoami  | vol mount
+$HOME           |  /home/podman $HOME $HOME                  | vol mount
 "
         while read vol expect name; do
             opts=
@@ -751,9 +770,36 @@ json-file | f
 
     run_podman run --rm -p 8080 --net=host $IMAGE echo $rand
     is "${lines[0]}" \
-       "Port mappings have been discarded as one of the Host, Container, Pod, and None network modes are in use" \
+       "Port mappings have been discarded because \"host\" network namespace mode does not support them" \
        "Warning is emitted before container output"
     is "${lines[1]}" "$rand" "Container runs successfully despite warning"
+}
+
+# bats test_tags=ci:parallel
+@test "podman run with --net=none and --port prints warning" {
+    rand=$(random_string 10)
+
+    run_podman run --rm -p 8080 --net=none $IMAGE echo $rand
+    is "${lines[0]}" \
+       "Port mappings have been discarded because \"none\" network namespace mode does not support them" \
+       "Warning is emitted before container output"
+    is "${lines[1]}" "$rand" "Container runs successfully despite warning"
+}
+
+# bats test_tags=ci:parallel
+@test "podman run with --net=container:id and --port prints warning" {
+    rand=$(random_string 10)
+
+    run_podman run -d --name=$rand $IMAGE top
+    cid=$output
+    run_podman run --rm -p 8080 --net=container:$cid $IMAGE echo $rand
+    is "${lines[0]}" \
+       "Port mappings have been discarded because \"container\" network namespace mode does not support them" \
+       "Warning is emitted before container output"
+    is "${lines[1]}" "$rand" "Container runs successfully despite warning"
+
+    # Cleanup
+    run_podman container rm -f -t0 $cid
 }
 
 # bats test_tags=ci:parallel
@@ -782,18 +828,26 @@ json-file | f
         # image mount is hard to test as a rootless user
         # and does not work remotely
         run_podman image mount $IMAGE
-        romount="$output"
+        mountpoint="$output"
+
+        rootfs=$PODMAN_TMPDIR/rootfs
+        cp -a "$mountpoint" "$rootfs"
+        # Make rootfs actually read only
+        mount --bind -o ro "$rootfs" "$rootfs"
+
+        run_podman image unmount $IMAGE
 
         randomname=c_$(safename)
         # :O (overlay) required with rootfs; see #14504
-        run_podman run --name=$randomname --rootfs $romount:O echo "Hello world"
+        run_podman run --name=$randomname --rootfs $rootfs:O echo "Hello world"
         is "$output" "Hello world"
 
         run_podman container inspect $randomname --format "{{.ImageDigest}}"
         is "$output" "" "Empty image digest for --rootfs container"
 
+        umount "$rootfs"
+
         run_podman rm -f -t0 $randomname
-        run_podman image unmount $IMAGE
     fi
 }
 
@@ -801,7 +855,6 @@ json-file | f
 # podman exec may truncate stdout/stderr; actually a bug in conmon:
 # https://github.com/containers/conmon/issues/236
 # CANNOT BE PARALLELIZED due to "-l"
-# bats test_tags=distro-integration
 @test "podman run - does not truncate or hang with big output" {
     # Size, in bytes, to dd and to expect in return
     char_count=700000
@@ -895,19 +948,28 @@ EOF
     run_podman 1 run --rm $IMAGE grep $user /etc/passwd
     run_podman run --hostuser=$user --rm $IMAGE grep $user /etc/passwd
 
-    # find a user with a uid > 100 that is a valid octal
     # Issue #19800
-    octal_user=$(awk -F\: '$1!="nobody" && $3>100 && $3~/^[0-7]+$/ {print $1 " " $3; exit}' /etc/passwd)
-    # test only if a valid user was found
-    if test -n "$octal_user"; then
-        read octal_username octal_userid <<< $octal_user
-        run_podman run --user=$octal_username --hostuser=$octal_username --rm $IMAGE id -u
-        is "$output" "$octal_userid"
+    # Use the rootless user ID which is likely to be octal on CI as new user IDs start with 1000.
+    userid=$(id -u)
+    if [[ $userid =~ ^[0-7]+$ ]]; then
+        run_podman run --user=$user --hostuser=$user --rm $IMAGE id -u
+        is "$output" "$userid"
     fi
 
-    user=$(id -u)
-    run_podman run --hostuser=$user --rm $IMAGE grep $user /etc/passwd
-    run_podman run --hostuser=$user --user $user --rm $IMAGE grep $user /etc/passwd
+    group=$(id -gn)
+    groupid=$(id -g)
+    userspec=$user:$groupid
+    run_podman run --hostuser=$userid --user $userspec --rm $IMAGE sh -c 'echo $(id -un):$(id -g)'
+    is "$output" "$userspec"
+
+    run_podman run --hostuser=$userid --user $userspec --group-entry="$group:x:$groupid:" --rm $IMAGE sh -c 'echo $(id -un):$(id -gn)'
+    is "$output" "$user:$group"
+
+    run_podman 126 run --hostuser=$userid --user "$user:$group" --rm $IMAGE sh -c 'echo $(id -un):$(id -gn)'
+    is "$output" "Error:.* no matching entries in group file"
+
+    run_podman run --hostuser=$userid --rm $IMAGE grep $userid /etc/passwd
+    run_podman run --hostuser=$userid --user $userid --rm $IMAGE grep $userid /etc/passwd
     user=bogus
     run_podman 126 run --hostuser=$user --rm $IMAGE grep $user /etc/passwd
 }
@@ -1108,22 +1170,28 @@ EOF
     run_podman rm $output
 }
 
-# bats test_tags=distro-integration, ci:parallel
+# bats test_tags=ci:parallel
 @test "podman run --device-read-bps" {
     skip_if_rootless "cannot use this flag in rootless mode"
 
+    if test \! -e /dev/nullb0; then
+        skip "/dev/nullb0 not present, use 'modprobe null_blk nr_devices=1' to create it"
+    fi
+
     local cid
+    local dev_maj_min=$(stat -c %Hr:%Lr /dev/nullb0)
+
     # this test is a triple check on blkio flags since they seem to sneak by the tests
     if is_cgroupsv2; then
-        run_podman run -dt --device-read-bps=/dev/zero:1M $IMAGE top
+        run_podman run -dt --device-read-bps=/dev/nullb0:1M $IMAGE top
         cid=$output
         run_podman exec -it $output cat /sys/fs/cgroup/io.max
-        is "$output" ".*1:5 rbps=1048576 wbps=max riops=max wiops=max" "throttle devices passed successfully.*"
+        is "$output" ".*$dev_maj_min rbps=1048576 wbps=max riops=max wiops=max" "throttle devices passed successfully.*"
     else
-        run_podman run -dt --device-read-bps=/dev/zero:1M $IMAGE top
+        run_podman run -dt --device-read-bps=/dev/nullb0:1M $IMAGE top
         cid=$output
         run_podman exec -it $output cat /sys/fs/cgroup/blkio/blkio.throttle.read_bps_device
-        is "$output" ".*1:5 1048576" "throttle devices passed successfully.*"
+        is "$output" ".*$dev_maj_min 1048576" "throttle devices passed successfully.*"
     fi
     run_podman container rm -f -t0 $cid
 }
@@ -1162,6 +1230,14 @@ EOF
     ctr_id=$output
     is "$run_output" "$ctr_id" "Did not find container ID in the output"
     run_podman rm $ctr_name
+}
+
+# Regression test for https://github.com/containers/podman/issues/27414
+# bats test_tags=ci:parallel
+@test "podman run with empty --detach-keys" {
+    # Empty string should disable detaching, not error with "invalid detach keys"
+    run_podman run --rm --detach-keys="" $IMAGE echo "success"
+    is "$output" "success" "empty detach-keys should work"
 }
 
 # 15895: --privileged + --systemd = hide /dev/ttyNN
@@ -1298,6 +1374,14 @@ EOF
         fi
     fi
 
+    ctr="c-h-$(safename)"
+    run_podman run -d --name $ctr --ulimit core=-1:-1 $IMAGE /home/podman/pause
+
+    run_podman inspect $ctr --format "{{.HostConfig.Ulimits}}"
+    assert "$output" =~ "RLIMIT_CORE -1 -1" "ulimit core is not set to unlimited"
+
+    run_podman rm -f $ctr
+
     run_podman run --ulimit core=-1:-1 --rm $IMAGE grep core /proc/self/limits
     assert "$output" =~ " ${max}  * ${max}  * bytes"
 
@@ -1413,7 +1497,9 @@ EOF
     # check if the underlying file system supports idmapped mounts
     run_podman '?' run --security-opt label=disable --rm --uidmap=0:1000:10000 --rootfs $romount:idmap true
     if [[ $status -ne 0 ]]; then
-        if [[ "$output" =~ "failed to create idmapped mount: invalid argument" ]]; then
+        # Note bash regex only works if the right hand side is unquoted so we have to use this extra var.
+        match="failed to create idmapped mount.* invalid argument"
+        if [[ "$output" =~ $match ]]; then
             skip "idmapped mounts not supported"
         fi
         # Any other error is fatal
@@ -1470,6 +1556,50 @@ EOF
         is "$output" "1" "container should exit 1 (policy: $policy)"
         run_podman rm -f -t0 $ctr
     done
+}
+
+# bats test_tags=ci:parallel
+@test "podman run --restart preserves hooks-dir" {
+    # regression test for #17935 to ensure hooks are run on successful restarts
+    ctr=c_$(safename)
+    hooksdir=$PODMAN_TMPDIR/hooks_$(safename)
+
+    skip_if_remote "--hooks-dir is not usable with remote"
+
+    mkdir -p "$hooksdir"
+    cat > "$hooksdir/settings.json" <<EOF
+{
+    "version": "1.0.0",
+    "when": { "always": true },
+    "hook": {
+        "path": "$hooksdir/hook.sh"
+    },
+    "stages": ["prestart", "poststop"]
+}
+EOF
+    cat >"$hooksdir/hook.sh" <<EOF
+#!/bin/sh
+# consume stdin
+cat > /dev/null
+echo ran >> "$hooksdir/log"
+EOF
+    chmod +x "$hooksdir/hook.sh"
+
+    run_podman run -d --restart=on-failure:2 \
+        --name="$ctr" --hooks-dir="$hooksdir" $IMAGE false
+
+    wait_for_restart_count "$ctr" 2 "restart preserves hooks-dir"
+
+    # also make sure 3rd restart has finished
+    # wait also waits until 'cleanup' is done, so poststop hook is
+    # done running after this command
+    run_podman wait "$ctr"
+    run_podman rm "$ctr"
+
+    # check prestart and poststop ran 3 times each
+    assert "$(wc -l < "$hooksdir/log")" = 6
+
+    rm -r "$hooksdir"
 }
 
 # bats test_tags=ci:parallel
@@ -1541,7 +1671,7 @@ search               | $IMAGE           |
            "$command --authfile=nonexistent-path"
 
         if [[ "$command" != "logout" ]]; then
-           REGISTRY_AUTH_FILE=$bogus run_podman ? $command $args
+           REGISTRY_AUTH_FILE=$bogus run_podman '?' $command $args
            assert "$output" !~ "credential file is not accessible" \
               "$command REGISTRY_AUTH_FILE=nonexistent-path"
 
@@ -1709,7 +1839,7 @@ search               | $IMAGE           |
     # Unclear why `-t0` is required here, works locally without.
     # But it shouldn't hurt and does make the test pass...
     PODMAN_TIMEOUT=5 run_podman 125 stop -t0 $cname
-    is "$output" "Error: container .* conmon exited prematurely, exit code could not be retrieved: internal libpod error" "correct error on missing conmon"
+    is "$output" "Error: container .* conmon exited prematurely, exit code could not be retrieved: conmon process killed" "correct error on missing conmon"
 
     # This should be safe because stop is guaranteed to call cleanup?
     run_podman inspect --format "{{ .State.Status }}" $cname
@@ -1733,6 +1863,112 @@ RUN umount /etc/hostname; rm /etc/hostname
     is "$output" "ls: /etc/hostname: No such file or directory" "container did not add /etc/hostname"
 
     run_podman rmi $randomname
+}
+
+@test "podman run --log-opt size= and containers.conf log_size_max" {
+    skip_if_remote "remote does not support CONTAINERS_CONF"
+
+    containersconf=$PODMAN_TMPDIR/containers.conf
+    cat >$containersconf <<EOF
+[containers]
+log_driver = "k8s-file"
+log_size_max = 400000000
+EOF
+
+    c1name=c1_$(safename)
+    CONTAINERS_CONF_OVERRIDE="$containersconf" run_podman create --name $c1name $IMAGE ls /
+    CONTAINERS_CONF_OVERRIDE="$containersconf" run_podman inspect --format '{{ .HostConfig.LogConfig.Size }}' $c1name
+    is "$output" "400MB"
+
+    c2name=c2_$(safename)
+    CONTAINERS_CONF_OVERRIDE="$containersconf" run_podman create --name $c2name --log-opt max-size=8000 $IMAGE ls /
+    CONTAINERS_CONF_OVERRIDE="$containersconf" run_podman inspect --format '{{ .HostConfig.LogConfig.Size }}' $c2name
+    is "$output" "8kB"
+
+    run_podman rm -f $c1name $c2name
+}
+
+# bats test_tags=networking,registry
+@test "podman run with --cert-dir" {
+    skip_if_remote "cert-dir option not working via remote"
+
+    test -n "$PODMAN_LOGIN_REGISTRY_PORT" || skip "registry not set up"
+
+    start_registry
+
+    image=localhost:${PODMAN_LOGIN_REGISTRY_PORT}/cert-dir-run-test-$(safename)
+
+    # First push an image to our test registry
+    run_podman push \
+               --cert-dir ${PODMAN_LOGIN_WORKDIR}/trusted-registry-cert-dir \
+               --creds ${PODMAN_LOGIN_USER}:${PODMAN_LOGIN_PASS} \
+               $IMAGE $image
+
+    # Run without --cert-dir should fail (TLS verification error)
+    run_podman 125 run --rm \
+               --creds ${PODMAN_LOGIN_USER}:${PODMAN_LOGIN_PASS} \
+               $image echo "this should fail"
+
+    # Run with --cert-dir should succeed (will pull the image)
+    run_podman run --rm \
+               --cert-dir ${PODMAN_LOGIN_WORKDIR}/trusted-registry-cert-dir \
+               --creds ${PODMAN_LOGIN_USER}:${PODMAN_LOGIN_PASS} \
+               $image true
+
+    # Clean up, and it would fail if the $image was not pulled
+    run_podman rmi $image
+}
+
+@test "podman run host env leak" {
+    # We need to create a invalid image config env value without "="
+    skopeo copy containers-storage:$IMAGE dir:$PODMAN_TMPDIR
+    config_digest=$(jq -r .config.digest $PODMAN_TMPDIR/manifest.json)
+    plain_digest=${config_digest#*:}
+    newfile="$PODMAN_TMPDIR/newfile"
+    # Append bad env to existing image envs
+    jq  '.config.Env += ["HOST*"]' $PODMAN_TMPDIR/$plain_digest >$newfile
+    # Get new digest and size so we can update the manifest
+    newdigest="$(sha256sum $newfile | cut -d" " -f 1)"
+    size=$(stat -c %s $newfile)
+    mv $newfile $PODMAN_TMPDIR/$newdigest
+    jq ".config.digest = \"sha256:$newdigest\" | .config.size=$size" $PODMAN_TMPDIR/manifest.json > $PODMAN_TMPDIR/manifest.json.new
+    mv $PODMAN_TMPDIR/manifest.json.new $PODMAN_TMPDIR/manifest.json
+
+    image="localhost/envimage:123"
+    skopeo copy dir:$PODMAN_TMPDIR containers-storage:$image
+
+    run_podman image inspect $image --format '{{.Config.Env}}'
+    assert "$output" =~ "HOST\*" "invalid env in image"
+
+    HOSTENV=123 run_podman 125 run --rm $image printenv HOSTENV
+    assert "$output" =~ 'invalid image env variable "HOST\*"' "Host env leak from image env on podman run"
+
+    podname="p-$(safename)"
+    ctrname="c-$(safename)"
+
+    fname="$PODMAN_TMPDIR/kube_$(safename).yaml"
+    echo "
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: test
+  name: $podname
+spec:
+  restartPolicy: Never
+  containers:
+    - name: $ctrname
+      image: $image
+      command:
+      - printenv
+      - HOSTENV
+" > $fname
+
+    run_podman 125 kube play $fname
+    assert "$output" =~ 'invalid image env variable "HOST\*"' "Host env leak from image env on kube play"
+
+    run_podman pod rm $podname
+    run_podman rmi $image
 }
 
 # vim: filetype=sh

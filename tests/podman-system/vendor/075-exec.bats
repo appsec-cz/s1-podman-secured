@@ -5,7 +5,7 @@
 
 load helpers
 
-# bats test_tags=distro-integration, ci:parallel
+# bats test_tags=ci:parallel
 @test "podman exec - basic test" {
     rand_filename=$(random_string 20)
     rand_content=$(random_string 50)
@@ -47,7 +47,6 @@ load helpers
     run_podman rm $cid
 }
 
-# bats test_tags=distro-integration, ci:parallel
 @test "podman exec - leak check" {
     skip_if_remote "test is meaningless over remote"
 
@@ -56,13 +55,17 @@ load helpers
     run_podman run -td $IMAGE /bin/sh
     cid="$output"
 
-    is "$(check_exec_pid)" "" "exec pid hash file indeed doesn't exist"
+    is "$(find_exec_pid_files)" "" "exec pid hash file indeed doesn't exist"
 
     for i in {1..3}; do
         run_podman exec $cid /bin/true
     done
 
-    is "$(check_exec_pid)" "" "there isn't any exec pid hash file leak"
+    is "$(find_exec_pid_files)" "" "there isn't any exec pid hash file leak"
+
+    # Ensure file is there while container is running
+    run_podman exec -d $cid sleep 100
+    is "$(find_exec_pid_files)" '.*containers.*exec_pid' "exec_pid file found"
 
     run_podman rm -t 0 -f $cid
 }
@@ -253,4 +256,60 @@ load helpers
     run_podman rm -f -t0 $cid
 }
 
+# bats test_tags=ci:parallel
+@test "podman exec - additional groups" {
+    run_podman run -d $IMAGE top
+    cid="$output"
+
+    run_podman exec $cid id -g nobody
+    nobody_id="$output"
+
+    run_podman exec $cid grep -h ^Groups: /proc/1/status /proc/self/status
+    assert "${lines[0]}" = "${lines[1]}" "must have the same additional groups"
+
+    run_podman exec --user root $cid grep -h ^Groups: /proc/1/status /proc/self/status
+    assert "${lines[0]}" = "${lines[1]}" "must have the same additional groups"
+
+    run_podman exec --user root:root $cid id -G
+    assert "${output}" = "0" "must have only 0 gid"
+
+    run_podman exec --user nobody $cid id -G
+    assert "${output}" = "${nobody_id}" "must have only nobody gid"
+
+    run_podman exec --user nobody:nobody $cid id -G
+    assert "${output}" = "${nobody_id}" "must have only nobody gid"
+
+    run_podman rm -f -t0 $cid
+
+    # Now test with --group-add
+
+    run_podman run --group-add 1,2,3,4,5,6,7,8,9,10 -d $IMAGE top
+    cid="$output"
+
+    run_podman exec $cid grep -h ^Groups: /proc/1/status /proc/self/status
+    assert "${lines[0]}" = "${lines[1]}" "must have the same additional groups"
+
+    run_podman exec --user 0 $cid grep -h ^Groups: /proc/1/status /proc/self/status
+    assert "${lines[0]}" = "${lines[1]}" "must have the same additional groups"
+
+    run_podman exec --user root $cid grep -h ^Groups: /proc/1/status /proc/self/status
+    assert "${lines[0]}" = "${lines[1]}" "must have the same additional groups"
+
+    run_podman exec --user root:root $cid id -G
+    assert "$output" = "0 1 2 3 4 5 6 7 8 9 10" "must have only the explicit groups added and 0"
+
+    run_podman exec --user 0:0 $cid id -G
+    assert "$output" = "0 1 2 3 4 5 6 7 8 9 10" "must have only the explicit groups added and 0"
+
+    run_podman exec --user nobody $cid id -G
+    assert "$output" = "$nobody_id 1 2 3 4 5 6 7 8 9 10" "must have only the explicit groups added and nobody"
+
+    run_podman exec --user nobody:nobody $cid id -G
+    assert "$output" = "$nobody_id 1 2 3 4 5 6 7 8 9 10" "must have only the explicit groups added and nobody"
+
+    run_podman exec --user root:nobody $cid id -G
+    assert "$output" = "$nobody_id 1 2 3 4 5 6 7 8 9 10" "must have only the explicit groups added and 0"
+
+    run_podman rm -f -t0 $cid
+}
 # vim: filetype=sh

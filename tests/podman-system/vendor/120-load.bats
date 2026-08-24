@@ -66,7 +66,7 @@ verify_iid_and_name() {
     # We can't use run_podman because that uses the BATS 'run' function
     # which redirects stdout and stderr. Here we need to guarantee
     # that podman's stdout is a pipe, not any other form of redirection
-    $PODMAN save --format oci-archive $fqin | cat >$archive
+    "${PODMAN_CMD[@]}" save --format oci-archive $fqin | cat >$archive
     assert "$?" -eq 0 "Command failed: podman save ... | cat"
 
     # Make sure we can reload it
@@ -129,7 +129,7 @@ verify_iid_and_name() {
     is "$output" "Copying blob .*Copying config.*Writing manifest"
 
     # confirm that image was copied. FIXME: also try $PODMAN image inspect?
-    _sudo $PODMAN image exists $newname
+    _sudo "${PODMAN_CMD[@]}" image exists $newname
 
     # Copy it back, this time using -q
     run_podman untag $IMAGE $newname
@@ -150,16 +150,16 @@ verify_iid_and_name() {
     assert "$output" =~ "$src_digest" "Digest of re-fetched image is in list of original image digests"
 
     # remove root img for transfer back with another name
-    _sudo $PODMAN image rm $newname
+    _sudo "${PODMAN_CMD[@]}" image rm $newname
 
     # get foobar's ID, for an ID transfer test
     run_podman image inspect --format '{{.ID}}' foobar:123
     run_podman image scp $output ${notme}@localhost::foobartwo
 
-    _sudo $PODMAN image exists foobartwo
+    _sudo "${PODMAN_CMD[@]}" image exists foobartwo
 
     # Clean up
-    _sudo $PODMAN image rm foobartwo
+    _sudo "${PODMAN_CMD[@]}" image rm foobartwo
     run_podman untag $IMAGE $newname
 
     # Negative test for nonexistent image.
@@ -220,23 +220,33 @@ verify_iid_and_name() {
 }
 
 @test "podman load - from URL" {
-    get_iid_and_name
-    run_podman save $img_name -o $archive
-    run_podman rmi $iid
+    # Use a different image, not $IMAGE, as we need that for the webserver container.
+    img1=${PODMAN_NONLOCAL_IMAGE_FQN}
+    _prefetch $img1
+
+    run_podman images -a --format '{{.ID}} {{.Repository}}:{{.Tag}}' $img1
+    images_output="$output"
+
+    archive=$PODMAN_TMPDIR/myimage-$(safename).tar
+    run_podman save $img1 -o $archive
+    run_podman rmi $img1
 
     HOST_PORT=$(random_free_port)
     SERVER=http://127.0.0.1:$HOST_PORT
 
     # Bind-mount the archive to a container running httpd
+    local cname="cweb=$(safename)"
     run_podman run -d --name myweb -p "$HOST_PORT:80" \
             -v $archive:/var/www/image.tar:Z \
             -w /var/www \
             $IMAGE /bin/busybox-extras httpd -f -p 80
 
     run_podman load -i $SERVER/image.tar
-    verify_iid_and_name $img_name
 
-    run_podman rm -f -t0 myweb
+    run_podman images -a --format '{{.ID}} {{.Repository}}:{{.Tag}}' $img1
+    assert "$output" == "$images_output"
+
+    run_podman rm -f -t0 $cname
 }
 
 @test "podman load - redirect corrupt payload" {
@@ -283,7 +293,7 @@ verify_iid_and_name() {
     # We can't use run_podman because that uses the BATS 'run' function
     # which redirects stdout and stderr. Here we need to guarantee
     # that podman's stdout is a pipe, not any other form of redirection
-    $PODMAN save -m $img1 $img2 | cat >$archive
+    "${PODMAN_CMD[@]}" save -m $img1 $img2 | cat >$archive
     assert "$?" -eq 0 "Command failed: podman save ... | cat"
 
     run_podman rmi -f $img1 $img2

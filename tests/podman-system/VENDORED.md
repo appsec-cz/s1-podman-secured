@@ -60,11 +60,17 @@ the suite is thorough and the machine is created from scratch.
 
 ## Baseline: what this suite does on this image
 
-Full run against the image built on 2026-08-23, rootless, in a throwaway machine:
+Full run against the image built on 2026-08-24 - kernel 7.1.8 from backports,
+podman 5.8.4 from unstable - rootless, in a throwaway machine:
 
 ```
-580 passed, 37 failed, 79 skipped   (about 50 minutes)
+630 passed, 34 failed, 82 skipped   (about 50 minutes)
 ```
+
+For comparison, the same image with Debian stable's podman 5.4.2 scored
+584 passed, 33 failed, 79 skipped: the newer podman brings a larger suite and
+passes 46 more tests, with the same failures plus `[200] podman pod create -
+hashtag AllTheOptions`, which comes and goes between runs.
 
 Podman's own banner confirms what it is testing:
 
@@ -87,12 +93,12 @@ this. Not fixable from here, and nothing is actually broken - our own
 `integration/test_runtime_behaviour.sh` checks that a published port does reach
 macOS.
 
-**5 - the storage driver.** `005-info` (3), `010-images` (1), `550-pause-process`
-(1). Three of them were caused by pinning `driver = "btrfs"`: every podman
-invocation whose store is not on btrfs failed outright, and `/tmp` is tmpfs, so
-anything using `--root` there died. Fixed by switching `storage.conf` to
-`driver_priority = ["btrfs", "overlay"]`, which keeps btrfs for the real graph
-root and falls back where btrfs cannot work. Verified with `GUEST_PATCH`.
+**5 - the storage driver and its neighbourhood.** `005-info` (3), `010-images` (1),
+`550-pause-process` (1). Pinning `driver = "btrfs"` used to make every podman
+invocation whose store is not on btrfs fail outright - and `/tmp` is tmpfs, so
+anything using `--root` there died. `storage.conf` now sets
+`driver_priority = ["btrfs", "overlay"]` instead, which fixed three of them.
+`[005] podman info - json` appeared with podman 5.8.4 and has not been looked at.
 
 The two that remain are not ours to fix: `[005] empty string defaults` sets its
 own storage.conf and then cannot use any driver on tmpfs, and `[010] additional

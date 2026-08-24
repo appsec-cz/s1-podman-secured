@@ -6,7 +6,7 @@
 load helpers
 load helpers.network
 
-# bats test_tags=distro-integration, ci:parallel
+# bats test_tags=ci:parallel
 @test "events with a filter by label and --no-trunc option" {
     cname=test-$(safename)
     labelname=labelname-$(safename)
@@ -27,6 +27,10 @@ load helpers.network
     # Now filter just by container name, no label
     run_podman events --since "$before" --filter type=container --filter container=$cname --filter event=start --stream=false
     is "$output" "$expect" "filtering just by container"
+
+    # Filter just by label key (without value)
+    run_podman events --since "$before" --filter type=container --filter label=${labelname} --filter event=start --stream=false
+    is "$output" "$expect" "filtering by label key only"
 
     # check --no-trunc=false
     truncID=${id:0:12}
@@ -157,7 +161,7 @@ function _events_disjunctive_filters() {
     _events_disjunctive_filters ""
 }
 
-# bats test_tags=distro-integration, ci:parallel
+# bats test_tags=ci:parallel
 @test "events with events_logfile_path in containers.conf" {
     skip_if_remote "remote does not support --events-backend"
     events_file=$PODMAN_TMPDIR/events.log
@@ -179,7 +183,7 @@ function _populate_events_file() {
     done
 }
 
-# bats test_tags=distro-integration, ci:parallel
+# bats test_tags=ci:parallel
 @test "events log-file rotation" {
     skip_if_remote "setting CONTAINERS_CONF_OVERRIDE logger options does not affect remote client"
 

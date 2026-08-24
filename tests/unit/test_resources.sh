@@ -96,6 +96,11 @@ test_storage_driver_is_btrfs() {
         "storage.conf prefers btrfs and falls back to overlay"
     assert_not_contains "$conf" 'driver = "btrfs"' \
         "storage.conf does not pin the driver"
+
+    # Pinning these to the rootful paths broke every rootless command on podman
+    # 5.8, which honours them where 5.4 silently substituted the user's own.
+    assert_not_contains "$conf" "graphroot" "storage.conf does not hardcode graphroot"
+    assert_not_contains "$conf" "runroot" "storage.conf does not hardcode runroot"
 }
 
 test_configs_survive_podman6_mount() {
@@ -151,6 +156,17 @@ test_missing_sentinelone_fails_the_build() {
     # something that passes every other check and does nothing useful.
     assert_contains "$(cat "$ROOT/build.sh")" "but no SentinelAgent*.deb in" \
         "build.sh fails when the agent is requested but absent"
+}
+
+test_container_stack_from_unstable() {
+    # Stable's podman never moves and backports carries no container packages at
+    # all, so the stack comes from unstable - pinned, so nothing else follows it.
+    local install
+    install=$(cat "$ROOT/resources/install.sh")
+    assert_contains "$install" "sid main" "install.sh adds unstable as a source"
+    assert_contains "$install" "Pin-Priority: 100" "unstable is pinned below stable"
+    assert_contains "$install" 'apt-get install -y -t sid $CONTAINER_STACK' \
+        "only the container stack is taken from unstable"
 }
 
 test_kernel_comes_from_backports() {

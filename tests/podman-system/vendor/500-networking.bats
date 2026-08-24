@@ -20,6 +20,8 @@ load helpers.network
     run_podman network ls -n
     assert "$output" !~ "$heading" "network ls -n shows header anyway"
 
+    since=$(date --iso-8601=seconds)
+
     # check deterministic list order
     local net1=net-a-$(safename)
     local net2=net-b-$(safename)
@@ -28,12 +30,22 @@ load helpers.network
     run_podman network create $net2
     run_podman network create $net3
 
+    # Quick check that we generate events
+    run_podman events --filter type=network --since $since --stream=false
+    assert "$output" =~ "network create [0-9a-f]{64} \(name=$net1, type=bridge\)" "network1 create event"
+    assert "$output" =~ "network create [0-9a-f]{64} \(name=$net2, type=bridge\)" "network2 create event"
+    assert "$output" =~ "network create [0-9a-f]{64} \(name=$net3, type=bridge\)" "network3 create event"
+
     run_podman network ls --quiet
     # just check that the order of the created networks is correct
     # we cannot do an exact match since developer and CI systems could contain more networks
     is "$output" ".*$net1.*$net2.*$net3.*podman.*" "networks sorted alphabetically"
 
     run_podman network rm $net1 $net2 $net3
+    run_podman events --filter type=network --since $since --stream=false
+    assert "$output" =~ "network remove [0-9a-f]{64} \(name=$net1, type=bridge\)" "network1 remove event"
+    assert "$output" =~ "network remove [0-9a-f]{64} \(name=$net2, type=bridge\)" "network2 remove event"
+    assert "$output" =~ "network remove [0-9a-f]{64} \(name=$net3, type=bridge\)" "network3 remove event"
 }
 
 # Copied from tsweeney's https://github.com/containers/podman/issues/4827
@@ -141,7 +153,7 @@ load helpers.network
 
         # emit random string, and check it
         teststring=$(random_string 30)
-        echo "$teststring" | nc 127.0.0.1 $myport
+        echo "$teststring" > /dev/tcp/127.0.0.1/$myport
 
         run_podman logs $cid
         # Sigh. We can't check line-by-line, because 'nc' output order is
@@ -284,7 +296,7 @@ load helpers.network
 
     # emit random string, and check it
     teststring=$(random_string 30)
-    echo "$teststring" | nc 127.0.0.1 $myport
+    echo "$teststring" > /dev/tcp/127.0.0.1/$myport
 
     run_podman logs $cid
     # Sigh. We can't check line-by-line, because 'nc' output order is
@@ -310,7 +322,6 @@ load helpers.network
 }
 
 # CANNOT BE PARALLELIZED due to iptables/nft commands
-# bats test_tags=distro-integration
 @test "podman network reload" {
     skip_if_remote "podman network reload does not have remote support"
 
@@ -492,7 +503,7 @@ load helpers.network
 }
 
 # Test for https://github.com/containers/podman/issues/10052
-# bats test_tags=distro-integration, ci:parallel
+# bats test_tags=ci:parallel
 @test "podman network connect/disconnect with port forwarding" {
     random_1=$(random_string 30)
     HOST_PORT=$(random_free_port)
@@ -582,6 +593,14 @@ load helpers.network
     is "$output" "" "disconnect of container with no open ports"
     run_podman network connect $netname $background_cid
     is "$output" "" "(re)connect of container with no open ports"
+
+    # connect a network with an intentional error (bad mac address)
+    run_podman 125 network connect --mac-address 00:00:00:00:00:00 $netname2 $cid
+    assert "$output" =~ "Cannot assign requested address" "mac address error"
+
+    # podman inspect must still work correctly and not error due network desync
+    run_podman inspect --format '{{ range $index, $value := .NetworkSettings.Networks }}{{$index}}{{end}}' $cid
+    assert "$output" == "$netname" "only network1 must be connected"
 
     # connect a second network
     run_podman network connect $netname2 $cid
@@ -741,7 +760,6 @@ nameserver 8.8.8.8" "nameserver order is correct"
     fi
     # we should use the integrated dns server
     run_podman run --network $netname --rm $IMAGE cat /etc/resolv.conf
-    assert "$output" =~ "search dns.podman.*" "correct search domain"
     assert "$output" =~ ".*nameserver $subnet.1.*" \
            "integrated dns nameserver is set"
 
@@ -759,7 +777,7 @@ nameserver 8.8.8.8" "nameserver order is correct"
     run_podman network rm -f $netname
 }
 
-# bats test_tags=distro-integration, ci:parallel
+# bats test_tags=ci:parallel
 @test "podman run port forward range" {
     # we run a long loop of tests lets run all combinations before bailing out
     defer-assertion-failures
@@ -770,13 +788,10 @@ nameserver 8.8.8.8" "nameserver order is correct"
         netmodes+=("slirp4netns:port_handler=slirp4netns" "slirp4netns:port_handler=rootlesskit")
     fi
     # pasta only works rootless
-    if is_rootless; then
-        if has_pasta; then
-            netmodes+=("pasta")
-        else
-            echo "# WARNING: pasta unavailable!" >&3
-        fi
-    fi
+    # FIXME: skip pasta because this is super flaky, https://bugs.passt.top/show_bug.cgi?id=202
+    #if is_rootless; then
+    #    netmodes+=("pasta")
+    #fi
 
     for netmode in "${netmodes[@]}"; do
         local range=$(random_free_port_range 3)
@@ -791,26 +806,26 @@ nameserver 8.8.8.8" "nameserver order is correct"
         cid="$output"
 
         # make sure binding the same port fails
-        run timeout 5 ncat -l 127.0.0.1 $port
-        assert "$status" -eq 2 "ncat unexpected exit code"
-        assert "$output" =~ "127.0.0.1:$port: Address already in use" "ncat error message"
+        run timeout 5 socat TCP-LISTEN:$port,bind=127.0.0.1,fork -
+        assert "$status" -eq 1 "socat unexpected exit code"
+        assert "$output" =~ ".* 127.0.0.1:$port.* Address already in use" "socat error message"
 
         for port in $(seq $port $end_port); do
             run_podman exec -d $cid nc -l -p $port -e /bin/cat
 
-            # we have to rety ncat as it can flake as we exec in the background so nc -l
+            # we have to retry socat as it can flake as we exec in the background so nc -l
             # might not have bound the port yet, retry seems simpler than checking if the
             # port is bound in the container, https://github.com/containers/podman/issues/21561.
             retries=5
             while [[ $retries -gt 0 ]]; do
-                run ncat 127.0.0.1 $port <<<$random
+                run socat - TCP:127.0.0.1:$port <<<$random
                 if [[ $status -eq 0 ]]; then
                     break
                 fi
                 sleep 0.5
                 retries=$((retries -1))
             done
-            is "$output" "$random" "ncat got data back (netmode=$netmode port=$port)"
+            is "$output" "$random" "socat got data back (netmode=$netmode port=$port)"
         done
 
         run_podman rm -f -t0 $cid
@@ -899,11 +914,21 @@ EOF
 @test "podman network rm --dns-option " {
     dns_opt=dns$(random_string)
     run_podman run --rm --dns-opt=${dns_opt} $IMAGE cat /etc/resolv.conf
-    is "$output" ".*options ${dns_opt}" "--dns-opt was added"
+    # Note that we must fully replace all host option so make a match for line start/end as well
+    # https://github.com/containers/podman/issues/22399
+    assert "$output" =~ ".*^options ${dns_opt}\$" "--dns-opt was added"
 
     dns_opt=dns$(random_string)
     run_podman run --rm --dns-option=${dns_opt} $IMAGE cat /etc/resolv.conf
-    is "$output" ".*options ${dns_opt}" "--dns-option was added"
+    assert "$output" =~ ".*^options ${dns_opt}\$" "--dns-option was added"
+
+    # now check with a custom network as well
+    local net=net-$(safename)
+    run_podman network create $net
+    run_podman run --rm --network $net --dns-option=${dns_opt} $IMAGE cat /etc/resolv.conf
+    assert "$output" =~ ".*^options ${dns_opt}\$" "--dns-option was added with custom network"
+
+    run_podman network rm -f $net
 }
 
 # bats test_tags=ci:parallel
@@ -963,27 +988,6 @@ EOF
         echo "$_LOG_PROMPT ip netns delete $netns"
         ip netns delete $netns
      fi
-}
-
-function wait_for_restart_count() {
-    local cname="$1"
-    local count="$2"
-    local tname="$3"
-
-    local timeout=10
-    while :; do
-        # Previously this would fail as the container would run out of ips after 5 restarts.
-        run_podman inspect --format "{{.RestartCount}}" $cname
-        if [[ "$output" == "$2" ]]; then
-            break
-        fi
-
-        timeout=$((timeout - 1))
-        if [[ $timeout -eq 0 ]]; then
-            die "Timed out waiting for RestartCount with $tname"
-        fi
-        sleep 0.5
-    done
 }
 
 # Test for https://github.com/containers/podman/issues/18615
@@ -1105,7 +1109,6 @@ function wait_for_restart_count() {
 @test "Podman unshare --rootless-netns with Pasta" {
     skip_if_remote "unshare is local-only"
     skip_if_not_rootless "pasta networking only available in rootless mode"
-    skip_if_no_pasta "pasta not found; this test requires pasta"
 
     pasta_iface=$(default_ifname 4)
     assert "$pasta_iface" != "" "pasta_iface is set"

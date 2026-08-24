@@ -5,8 +5,9 @@
 #
 
 load helpers
+load helpers.network
+load helpers.registry
 
-# bats test_tags=distro-integration
 @test "podman build - basic test" {
     rand_filename=$(random_string 20)
     rand_content=$(random_string 50)
@@ -16,13 +17,11 @@ load helpers
     dockerfile=$tmpdir/Dockerfile
     cat >$dockerfile <<EOF
 FROM $IMAGE
-RUN apk add nginx
 RUN echo $rand_content > /$rand_filename
 EOF
 
-    # The 'apk' command can take a long time to fetch files; bump timeout
     imgname="b-$(safename)"
-    PODMAN_TIMEOUT=240 run_podman build -t $imgname --format=docker $tmpdir
+    run_podman build -t $imgname --format=docker $tmpdir
     is "$output" ".*COMMIT" "COMMIT seen in log"
 
     # $IMAGE is preloaded, so we should never re-pull
@@ -279,24 +278,44 @@ EOF
     tmpdir=$PODMAN_TMPDIR/build-test
     mkdir -p $tmpdir
 
+    # Create a test file with random content
+    INDEX=$PODMAN_TMPDIR/index.txt
+    local content="test-$(random_string)"
+    echo "$content" > $INDEX
+    echo READY > $PODMAN_TMPDIR/ready
+
+    # Setup local webserver
+    local host_port=$(random_free_port)
+    local server=http://127.0.0.1:$host_port
+    serverctr="c1-$(safename)"
+    run_podman run -d --name $serverctr -p "$host_port:80" \
+               -v $INDEX:/var/www/index.txt:Z \
+               -v $PODMAN_TMPDIR/ready:/var/www/ready:Z \
+               -w /var/www \
+               $IMAGE /bin/busybox-extras httpd -f -p 80
+
+    wait_for_command_output "curl -s -S $server/ready" "READY"
+
     cat >$tmpdir/Dockerfile <<EOF
 FROM $IMAGE
-ADD https://github.com/containers/podman/blob/main/README.md /tmp/
+ADD $server/index.txt /tmp/
 EOF
 
     imgname="b-$(safename)"
     run_podman build -t $imgname $tmpdir
-    run_podman run --rm $imgname stat /tmp/README.md
+    run_podman run --rm $imgname cat /tmp/index.txt
+    assert "$output" == "$content" "file has right content"
     run_podman rmi -f $imgname
 
     # Now test COPY. That should fail.
     sed -i -e 's/ADD/COPY/' $tmpdir/Dockerfile
     run_podman 125 build -t $imgname $tmpdir
     is "$output" ".* building at STEP .*: source can't be a URL for COPY"
+
+    run_podman rm -f -t0 $serverctr
 }
 
 
-# bats test_tags=distro-integration
 @test "podman build - workdir, cmd, env, label" {
     tmpdir=$PODMAN_TMPDIR/build-test
     mkdir -p $tmpdir
@@ -584,6 +603,7 @@ Labels.\"io.buildah.version\" | $buildah_version
          -subdir2/sub2 -subdir2/sub2.txt
          -subdir2/sub3 -subdir2/sub3.txt
          this-file-does-not-match-anything-in-ignore-file
+         -foo
          comment
     )
     for f in "${files[@]}"; do
@@ -613,6 +633,7 @@ subdir1
 subdir2
 !*/sub1*
 !subdir1/sub3*
+/foo
 EOF
 
         # Build an image. For .dockerignore
@@ -927,6 +948,61 @@ EOF
     is "$output" \
        ".*Error: creating build container: quay.io/libpod/nosuchimage:nosuchtag: image not known" \
        "--pull-never fails with expected error message"
+}
+
+@test "podman build --pull=newer" {
+    skip_if_remote "tests depend on start_registry which does not work with podman-remote"
+    start_registry
+
+    local registry=localhost:${PODMAN_LOGIN_REGISTRY_PORT}
+    local image_for_test=$registry/i-$(safename):$(random_string)
+    local authfile=$PODMAN_TMPDIR/authfile.json
+    local tmpdir=$PODMAN_TMPDIR/build-test
+
+    run_podman login --authfile=$authfile \
+        --tls-verify=false \
+        --username ${PODMAN_LOGIN_USER} \
+        --password ${PODMAN_LOGIN_PASS} \
+        $registry
+
+    # Generate a test image and push it to the registry.
+    # For safety in parallel runs, test image must be isolated
+    # from $IMAGE. A simple add-tag will not work. (#23756)
+    run_podman create -q $IMAGE true
+    local tmpcid=$output
+    run_podman commit -q $tmpcid $image_for_test
+    run_podman rm $tmpcid
+    run_podman image push --tls-verify=false --authfile=$authfile $image_for_test
+
+    local tmpdir=$PODMAN_TMPDIR/build-test
+    mkdir -p $tmpdir
+
+    # Now build using $image_for_test
+    cat >$tmpdir/Containerfile <<EOF
+FROM $image_for_test
+EOF
+
+    # Build the image
+    run_podman build $tmpdir --pull=newer --tls-verify=false --authfile=$authfile
+    is "$output" ".*pull" "pull seen in log"
+    is "$output" ".*COMMIT" "COMMIT seen in log"
+
+    # Build again
+    run_podman build $tmpdir --pull=newer --tls-verify=false --authfile=$authfile
+    assert "$output" !~ "pull" "should not pull the image again"
+
+    # Now refresh the remote image
+    run_podman create -q $IMAGE true
+    local tmpcid=$output
+    run_podman commit -q $tmpcid $image_for_test
+    run_podman rm $tmpcid
+    run_podman image push --tls-verify=false --authfile=$authfile $image_for_test
+
+    # Build one more time
+    run_podman build $tmpdir --pull=newer --tls-verify=false --authfile=$authfile
+    is "$output" ".*pull" "pull seen in log"
+
+    run_podman image rm --ignore $image_for_test
 }
 
 @test "podman build --logfile test" {

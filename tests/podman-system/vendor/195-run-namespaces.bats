@@ -5,7 +5,7 @@
 
 load helpers
 
-# bats test_tags=distro-integration, ci:parallel
+# bats test_tags=ci:parallel
 @test "podman test all namespaces" {
     # format is nsname | option name
     tests="
@@ -38,7 +38,13 @@ uts    | uts
             run_podman logs $cname
             con1_ns="$output"
 
-            assert "$con1_ns" == "$con2_ns" "($name) namespace matches (type: $type)"
+            if [[ "$option" = "pid" ]] && is_rootless && ! is_remote && [[ "$(podman_runtime)" = "runc" ]]; then
+                # Replace "pid:[1234567]" with "pid:\[1234567\]"
+                con1_ns_esc="${con1_ns//[\[\]]/\\&}"
+                assert "$con2_ns" =~ "${con1_ns_esc}" "($name) namespace matches (type: $type)"
+            else
+                assert "$con1_ns" == "$con2_ns" "($name) namespace matches (type: $type)"
+            fi
             local matcher="=="
             if [[ "$type" != "host" ]]; then
                 matcher="!="

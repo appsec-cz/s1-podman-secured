@@ -16,7 +16,6 @@ function teardown() {
 }
 
 
-# bats test_tags=distro-integration
 @test "podman update - test all options" {
     local cgv=1
     if is_cgroupsv2; then
@@ -63,10 +62,10 @@ memory-reservation  =           400M | 2 | $mm.soft_limit_in_bytes  = 419430400 
 blkio-weight        =            321 | - | -                                       | io.bfq.weight   = default 321 $lomajmin 98
 blkio-weight-device = $LOOPDEVICE:98 | - | -                                       | io.bfq.weight   = default 321 $lomajmin 98
 
-device-read-bps     = /dev/zero:10mb | - | -                                       | io.max          = $devicemax
-device-read-iops    = /dev/zero:2000 | - | -                                       | io.max          = $devicemax
-device-write-bps    = /dev/zero:30mb | - | -                                       | io.max          = $devicemax
-device-write-iops   = /dev/zero:4000 | - | -                                       | io.max          = $devicemax
+device-read-bps     = $LOOPDEVICE:10mb | - | -                                       | io.max          = $devicemax
+device-read-iops    = $LOOPDEVICE:2000 | - | -                                       | io.max          = $devicemax
+device-write-bps    = $LOOPDEVICE:30mb | - | -                                       | io.max          = $devicemax
+device-write-iops   = $LOOPDEVICE:4000 | - | -                                       | io.max          = $devicemax
 "
 
     # Run a container
@@ -326,4 +325,85 @@ function nrand() {
 
     run_podman rm -t 0 -f $ctrname
 }
+
+# bats test_tags=ci:parallel
+@test "podman update - non-block device rejected by --*device* options" {
+    local dev=/dev/zero # Not a block device.
+    local block_opts=(
+        "--blkio-weight-device=$dev:123"
+        "--device-read-bps=$dev:10mb"
+        "--device-write-bps=$dev:10mb"
+        "--device-read-iops=$dev:1000"
+        "--device-write-iops=$dev:1000"
+    )
+    run_podman run -d "$IMAGE" /home/podman/pause
+    cid="$output"
+
+    defer-assertion-failures
+    for opt in "${block_opts[@]}"; do
+        run_podman 125 update "$cid" "$opt"
+        assert "$output" =~ "$dev: not a block device"
+    done
+    immediate-assertion-failures
+
+    run_podman rm -t 0 -f "$cid"
+}
+
+# bats test_tags=ci:parallel
+@test "podman update - set ulimits" {
+    local ctrname="c-h-$(safename)"
+
+    run_podman run -d --name $ctrname $IMAGE sh -c "echo 'nofile:' \$(ulimit -n); echo 'nproc:' \$(ulimit -u); top"
+
+    # Update with single ulimit
+    run_podman update --ulimit nofile=1024:1024 $ctrname
+
+    # Restart container to apply ulimit changes
+    run_podman restart $ctrname
+
+    # Verify the nofile ulimit was updated in the main process
+    run_podman logs $ctrname
+    assert "$output" =~ "nofile: 1024" "nofile ulimit updated to 1024 in main process"
+
+    # Update with multiple ulimits
+    run_podman update --ulimit nofile=2048:2048 --ulimit nproc=512:512 $ctrname
+    run_podman restart $ctrname
+    run_podman logs $ctrname
+    assert "$output" =~ "nofile: 2048" "nofile ulimit updated to 2048 in main process"
+    assert "$output" =~ "nproc: 512" "nproc ulimit updated to 512 in main process"
+
+    # Capture host values by running a temporary container with --ulimit host option
+    run_podman run --rm --ulimit host $IMAGE sh -c "echo 'nofile:' \$(ulimit -n); echo 'nproc:' \$(ulimit -u)"
+    local host_nofile=$(echo "$output" | awk '/^nofile:/ {print $2}')
+    local host_nproc=$(echo "$output" | awk '/^nproc:/ {print $2}')
+
+    # Update with -1 for unlimited
+    run_podman update --ulimit nproc=-1:-1 $ctrname
+    run_podman restart $ctrname
+    run_podman logs $ctrname
+    if is_rootless; then
+        assert "$output" =~ "nproc: $host_nproc" "rootless ulimit should clamp to host limit after restart with -1"
+    else
+        assert "$output" =~ "nproc: unlimited" "ulimit should be unlimited after restart with -1"
+    fi
+
+    # Update with --ulimit host option
+    run_podman update --ulimit host $ctrname
+    run_podman restart $ctrname
+    run_podman logs $ctrname
+    assert "$output" =~ "nofile: $host_nofile" "nofile ulimit should match host value ($host_nofile)"
+    assert "$output" =~ "nproc: $host_nproc" "nproc ulimit should match host value ($host_nproc)"
+
+    # Error case - update with invalid ulimit syntax
+    run_podman 125 update --ulimit nofile:1024:1024 $ctrname
+    assert "$output" =~ "invalid ulimit argument" "Invalid ulimit syntax should fail"
+
+    # Error case - update with invalid ulimit values (soft > hard)
+    run_podman 125 update --ulimit nofile=2048:1024 $ctrname
+    assert "$output" =~ "ulimit soft limit must be less than or equal to hard limit" "Invalid ulimit values should fail"
+
+    # Clean up
+    run_podman rm -t 0 -f $ctrname
+}
+
 # vim: filetype=sh

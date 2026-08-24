@@ -35,6 +35,46 @@ SYSTEMD_IMAGE=$PODMAN_SYSTEMD_IMAGE_FQN
 # Default timeout for a podman command.
 PODMAN_TIMEOUT=${PODMAN_TIMEOUT:-120}
 
+function add_podman_args {
+  declare -n arrayptr=$1
+
+  if is_remote ; then
+    case "${REMOTESYSTEM_TRANSPORT}" in
+    tcp|tls|mtls)
+      arrayptr+=(--url="tcp://localhost:${REMOTESYSTEM_TCP_PORT}")
+      ;;
+    unix)
+      arrayptr+=(--url="unix://${REMOTESYSTEM_UNIX_SOCK}")
+    esac
+    case "${REMOTESYSTEM_TRANSPORT}" in
+    tls|mtls)
+      arrayptr+=(--tls-ca="${REMOTESYSTEM_TLS_CA_CRT}")
+      ;;
+    esac
+    case "${REMOTESYSTEM_TRANSPORT}" in
+    mtls)
+      arrayptr+=(
+        --tls-cert="${REMOTESYSTEM_TLS_CLIENT_CRT}"
+        --tls-key="${REMOTESYSTEM_TLS_CLIENT_KEY}"
+      )
+      ;;
+    esac
+  fi
+}
+
+
+export REMOTESYSTEM_TLS_CA_CRT=${BATS_SUITE_TMPDIR}/remotesystem.ca.crt.pem
+export REMOTESYSTEM_TLS_CA_KEY=${BATS_SUITE_TMPDIR}/remotesystem.ca.key.pem
+export REMOTESYSTEM_TLS_SERVER_CRT=${BATS_SUITE_TMPDIR}/remotesystem.server.crt.pem
+export REMOTESYSTEM_TLS_SERVER_KEY=${BATS_SUITE_TMPDIR}/remotesystem.server.key.pem
+export REMOTESYSTEM_TLS_CLIENT_CRT=${BATS_SUITE_TMPDIR}/remotesystem.client.crt.pem
+export REMOTESYSTEM_TLS_CLIENT_KEY=${BATS_SUITE_TMPDIR}/remotesystem.client.key.pem
+export REMOTESYSTEM_TLS_BOGUS_CRT=${BATS_SUITE_TMPDIR}/remotesystem.bogus.crt.pem
+export REMOTESYSTEM_TLS_BOGUS_KEY=${BATS_SUITE_TMPDIR}/remotesystem.bogus.key.pem
+
+# Full command to run podman, including remote flags. This is (re)set by basic_setup.
+PODMAN_CMD=()
+
 # Prompt to display when logging podman commands; distinguish root/rootless
 _LOG_PROMPT='$'
 if [ $(id -u) -eq 0 ]; then
@@ -145,6 +185,9 @@ function basic_setup() {
     # ancient BATS (v1.1) in RHEL gating tests.)
     PODMAN_TMPDIR=$(mktemp -d --tmpdir=${BATS_TMPDIR:-/tmp} podman_bats.XXXXXX)
 
+    PODMAN_CMD=("${PODMAN}")
+    add_podman_args PODMAN_CMD
+
     # runtime is not likely to change
     if [[ -z "$PODMAN_RUNTIME" ]]; then
         PODMAN_RUNTIME=$(podman_runtime)
@@ -207,6 +250,9 @@ function defer-assertion-failures() {
 # Basic teardown: remove all pods and containers
 function basic_teardown() {
     echo "# [teardown]" >&2
+
+    PODMAN_CMD=("${PODMAN}")
+    add_podman_args PODMAN_CMD
 
     # Free any ports reserved by our test
     if [[ -d $PORT_LOCK_DIR ]]; then
@@ -291,7 +337,7 @@ function restore_image() {
 #######################
 function _run_podman_quiet() {
     # This should be the same as what run_podman() does.
-    run timeout -v --foreground --kill=10 60 $PODMAN $_PODMAN_TEST_OPTS "$@"
+    run timeout -v --foreground --kill=10 60 ${PODMAN_CMD[@]} $_PODMAN_TEST_OPTS "$@"
     if [[ $status -ne 0 ]]; then
         echo "# Error running command: podman $*"
         echo "$output"
@@ -394,7 +440,7 @@ function clean_setup() {
             # Special case for timeout: check for locks (#18514)
             if [[ $status -eq 124 ]]; then
                 echo "# [teardown] $_LOG_PROMPT podman system locks" >&3
-                run $PODMAN system locks
+                run "${PODMAN_CMD[@]}" system locks
                 for line in "${lines[*]}"; do
                     echo "# $line" >&3
                 done
@@ -451,21 +497,6 @@ function clean_setup() {
     # Make sure desired image is present
     if [[ -z "$found_needed_image" ]]; then
         _prefetch $PODMAN_TEST_IMAGE_FQN
-    fi
-
-    # Load (create, actually) the pause image. This way, all pod tests will
-    # have it available. Without this, pod tests run in parallel will leave
-    # behind <none>:<none> images.
-    # FIXME: only do this when running parallel! Otherwise, we may break
-    #        test expectations.
-    #        SUB-FIXME: there's no actual way to tell if we're running bats
-    #                   in parallel (see bats-core#998). Use undocumented hack.
-    # FIXME: #23292 -- this should not be necessary.
-    if [[ -n "$BATS_SEMAPHORE_DIR" ]]; then
-        run_podman pod create mypod
-        run_podman pod rm mypod
-        # And now, we have a pause image, and each test does not
-        # need to build their own.
     fi
 }
 
@@ -527,11 +558,16 @@ function run_podman() {
         silence127="!"
     fi
 
+    podman_args=()
+    add_podman_args podman_args
+
+
     # stdout is only emitted upon error; this printf is to help in debugging
-    printf "\n%s %s %s %s\n" "$(timestamp)" "$_LOG_PROMPT" "$PODMAN" "$*"
+    printf "\n%s %s %s %s %s\n" "$(timestamp)" "$_LOG_PROMPT" $PODMAN "${podman_args[*]}" "$*"
+
     # BATS hangs if a subprocess remains and keeps FD 3 open; this happens
     # if podman crashes unexpectedly without cleaning up subprocesses.
-    run $silence127 timeout --foreground -v --kill=10 $PODMAN_TIMEOUT $PODMAN $_PODMAN_TEST_OPTS "$@" 3>/dev/null
+    run $silence127 timeout --foreground -v --kill=10 $PODMAN_TIMEOUT $PODMAN "${podman_args[@]}" $_PODMAN_TEST_OPTS "$@" 3>/dev/null
     # without "quotes", multiple lines are glommed together into one
     if [ -n "$output" ]; then
         echo "$(timestamp) $output"
@@ -757,7 +793,7 @@ function selinux_enabled() {
 function podman_runtime() {
     # This function is intended to be used as '$(podman_runtime)', i.e.
     # our caller wants our output. It's unsafe to use run_podman().
-    runtime=$($PODMAN $_PODMAN_TEST_OPTS info --format '{{ .Host.OCIRuntime.Name }}' 2>/dev/null)
+    runtime=$("${PODMAN_CMD[@]}" info --format '{{ .Host.OCIRuntime.Name }}' 2>/dev/null)
     basename "${runtime:-[null]}"
 }
 
@@ -810,15 +846,6 @@ function journald_unavailable() {
     echo "WEIRD: 'journalctl -n 1' failed with a non-permission error:"
     echo "$output"
     return 1
-}
-
-# Returns the name of the local pause image.
-function pause_image() {
-    # This function is intended to be used as '$(pause_image)', i.e.
-    # our caller wants our output. run_podman() messes with output because
-    # it emits the command invocation to stdout, hence the redirection.
-    run_podman version --format "{{.Server.Version}}-{{.Server.Built}}" >/dev/null
-    echo "localhost/podman-pause:$output"
 }
 
 # Wait for the pod (1st arg) to transition into the state (2nd arg)
@@ -1268,11 +1295,14 @@ function safename() {
 # Return exec_pid hash files if exists, otherwise, return nothing
 #
 function find_exec_pid_files() {
-    run_podman info --format '{{.Store.RunRoot}}'
+    _run_podman_quiet info --format '{{.Store.GraphRoot}}'
     local storage_path="$output"
-    if [ -d $storage_path ]; then
-        find $storage_path -type f -iname 'exec_pid_*'
+
+    if [ ! -d "$storage_path" ]; then
+        echo "error: storage path does not exist"
     fi
+
+    find "$storage_path" -type f -iname 'exec_pid'
 }
 
 
@@ -1368,6 +1398,142 @@ function ensure_no_mountpoint() {
     local path="$1"
     if findmnt "$path"; then
         die "there is a mountpoint at $path"
+    fi
+}
+
+###########################
+# ensure container has been restarted requested times
+###########################
+function wait_for_restart_count() {
+    local cname="$1"
+    local count="$2"
+    local tname="$3"
+
+    local timeout=10
+    while :; do
+        # Previously this would fail as the container would run out of ips after 5 restarts.
+        run_podman inspect --format "{{.RestartCount}}" $cname
+        if [[ "$output" == "$2" ]]; then
+            break
+        fi
+
+        timeout=$((timeout - 1))
+        if [[ $timeout -eq 0 ]]; then
+            die "Timed out waiting for RestartCount with $tname"
+        fi
+        sleep 0.5
+    done
+}
+
+function gen-cert-pair {
+  cn=$1 key=$2 cert=$3
+  shift 3
+  openssl req -x509 \
+    -quiet \
+    -nodes \
+    -newkey rsa:4096 -keyout "${key}" \
+    -out "${cert}" \
+    -days 1 \
+    -subj "/C=??/ST=System/L=Test/O=Containers/OU=Podman/CN=${cn}" \
+    "$@"
+}
+
+function gen-signed-cert-pair {
+  cn=$1 key=$2 cert=$3 ca_key=$4 ca_cert=$5
+  shift 5
+  gen-cert-pair "${cn}" \
+    "${key}" "${cert}" \
+    -CAkey "${ca_key}" -CA "${ca_cert}" \
+    "$@"
+}
+
+function gen-tls {
+  rm -f \
+    "${REMOTESYSTEM_TLS_CA_KEY}" "${REMOTESYSTEM_TLS_CA_CRT}" \
+    "${REMOTESYSTEM_TLS_CLIENT_KEY}" "${REMOTESYSTEM_TLS_CLIENT_CRT}" \
+    "${REMOTESYSTEM_TLS_SERVER_KEY}" "${REMOTESYSTEM_TLS_SERVER_CRT}" \
+    "${REMOTESYSTEM_TLS_BOGUS_KEY}" "${REMOTESYSTEM_TLS_BOGUS_CRT}"
+
+  # CA
+  gen-cert-pair "ca" \
+    "${REMOTESYSTEM_TLS_CA_KEY}" "${REMOTESYSTEM_TLS_CA_CRT}" \
+    -addext basicConstraints=critical,CA:TRUE,pathlen:1
+  # Client, signed by CA
+  gen-signed-cert-pair "client" \
+    "${REMOTESYSTEM_TLS_CLIENT_KEY}" "${REMOTESYSTEM_TLS_CLIENT_CRT}" \
+    "${REMOTESYSTEM_TLS_CA_KEY}" "${REMOTESYSTEM_TLS_CA_CRT}" \
+
+  # Server, signed by CA, valid for localhost, 127.0.0.1
+  # NOTE: Go refuses certs without SAN's
+  gen-signed-cert-pair "localhost" \
+    "${REMOTESYSTEM_TLS_SERVER_KEY}" "${REMOTESYSTEM_TLS_SERVER_CRT}" \
+    "${REMOTESYSTEM_TLS_CA_KEY}" "${REMOTESYSTEM_TLS_CA_CRT}" \
+    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+
+  # Bogus, self-signed
+  gen-cert-pair "bogus" \
+    "${REMOTESYSTEM_TLS_BOGUS_KEY}" "${REMOTESYSTEM_TLS_BOGUS_CRT}" \
+    -addext basicConstraints=critical,CA:TRUE,pathlen:1
+}
+
+
+function systemd-run-user {
+  args=()
+  if [ "${UID}" != '0' ]; then
+    args+=(--user)
+  fi
+  systemd-run "${args[@]}" "$@"
+}
+
+function systemctl-user {
+  args=()
+  if [ "${UID}" != '0' ]; then
+    args+=(--user)
+  fi
+  systemctl "${args[@]}" "$@"
+}
+
+SUITE_SERVICE_NAME="podman-service-$(random_string)"
+SUITE_PIDFILE="${BATS_SUITE_TMPDIR}/podman-system-service.pid"
+function start-suite-podman-system-service {
+    service_args=()
+    case "${REMOTESYSTEM_TRANSPORT}" in
+    tls|mtls)
+      service_args+=(
+        --tls-cert="${REMOTESYSTEM_TLS_SERVER_CRT}"
+        --tls-key="${REMOTESYSTEM_TLS_SERVER_KEY}"
+      )
+      ;;
+    esac
+    case "${REMOTESYSTEM_TRANSPORT}" in
+    mtls)
+      service_args+=(--tls-client-ca="${REMOTESYSTEM_TLS_CA_CRT}")
+      ;;
+    esac
+    case "${REMOTESYSTEM_TRANSPORT}" in
+    tcp|tls|mtls)
+      service_args+=("tcp://localhost:${REMOTESYSTEM_TCP_PORT}")
+      ;;
+    unix)
+      rm "${REMOTESYSTEM_UNIX_SOCK}"
+      service_args+=("unix://${REMOTESYSTEM_UNIX_SOCK}")
+    esac
+
+    # TODO: In the future, use systemd if possible
+    # systemd-run-user --unit=$SUITE_SERVICE_NAME ${PODMAN%%-remote*} system service "${service_args[@]}" --time=0
+    ${PODMAN%%-remote*} system service "${service_args[@]}" --time=0 &> "${PODMAN_SERVER_LOG:-/dev/null}" &
+    echo $! > "${SUITE_PIDFILE}"
+
+    retry=5
+    while [ $retry -ge 0 ]; do
+      echo Waiting for system service...
+      sleep 1
+      "${PODMAN_CMD[@]}" system info && break
+      retry=$(expr $retry - 1)
+    done
+    if [ $retry -lt 0 ]; then
+      echo "Error: ./bin/podman system service did not come up" >&2
+      exit 1
     fi
 }
 

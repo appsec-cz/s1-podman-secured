@@ -242,7 +242,6 @@ EOF
 
 # Podman volume import test
 @test "podman volume import test" {
-    skip_if_remote "volumes import is not applicable on podman-remote"
     run_podman volume create --driver local my_vol
     run_podman run --rm -v my_vol:/data $IMAGE sh -c "echo hello >> /data/test"
     run_podman volume create my_vol2
@@ -260,8 +259,6 @@ EOF
 
 # stdout with NULs is easier to test here than in ginkgo
 @test "podman volume export to stdout" {
-    skip_if_remote "N/A on podman-remote"
-
     local volname="myvol_$(random_string 10)"
     local mountpoint="/data$(random_string 8)"
 
@@ -278,7 +275,7 @@ EOF
     # The "-v" is only for debugging: tar will emit the filename to stderr.
     # If this test ever fails, that may give a clue.
     echo "$_LOG_PROMPT $PODMAN volume export $volname | tar -x ..."
-    tar_output="$($PODMAN volume export $volname | tar -x -v --to-stdout)"
+    tar_output="$("${PODMAN_CMD[@]}" volume export $volname | tar -x -v --to-stdout)"
     echo "$tar_output"
     assert "$tar_output" == "$content" "extracted content"
 
@@ -411,7 +408,6 @@ EOF
     is "$output"  "" "no more volumes to prune"
 }
 
-# bats test_tags=distro-integration
 @test "podman volume type=bind" {
     myvoldir=${PODMAN_TMPDIR}/volume_$(random_string)
     mkdir $myvoldir

@@ -270,8 +270,7 @@ function _check_no_suggestions() {
     random_image_name="i-$(safename)"
     random_image_tag=$(random_string 5)
     random_network_name="n-$(safename)"
-    # Do not change the suffix, it is special debug for #23913
-    random_volume_name="v-$(safename)-ebpf-debug-23913"
+    random_volume_name="v-$(safename)"
     random_secret_name="s-$(safename)"
     random_secret_content=$(random_string 30)
     secret_file=$PODMAN_TMPDIR/$(random_string 10)
@@ -410,4 +409,24 @@ function _check_no_suggestions() {
 
     # cleanup container
     run_podman rm $ctrname
+}
+
+# bats test_tags=ci:parallel
+@test "podman run --sysctl completion for sysctl" {
+    skip_if_remote "sysctl option not working via remote"
+
+    run_completion run --sysctl net.
+
+    assert "$output" =~ "^net\." \
+      "Only suggestions with 'net.' should be present for podman run --sysctl net."
+
+    _check_completion_end NoFileComp
+}
+
+@test "podman network create --interface-name" {
+    run_completion network create --interface-name l
+
+    assert "$output" =~ '.*lo.*' "Loopback interface should be present by default"
+
+    _check_completion_end NoFileComp
 }

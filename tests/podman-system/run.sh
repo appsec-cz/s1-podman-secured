@@ -75,7 +75,13 @@ set -u
 sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1
 missing=""
 for pkg in bats skopeo jq socat ncat nmap gzip xz-utils tar apache2-utils openssl catatonit; do
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$pkg" >/dev/null 2>&1 || missing="$missing $pkg"
+    # The image takes its container stack from unstable, and stable's skopeo
+    # cannot be installed next to it - its dependencies are held back. Fall back
+    # to unstable for anything stable refuses; on an image without the unstable
+    # source the fallback simply fails too and the package is reported missing.
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$pkg" >/dev/null 2>&1 \
+        || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -t sid "$pkg" >/dev/null 2>&1 \
+        || missing="$missing $pkg"
 done
 [ -n "$missing" ] && echo "WARNING: could not install:$missing"
 for cmd in bats skopeo jq socat; do

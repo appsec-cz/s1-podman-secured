@@ -117,12 +117,6 @@ RELABEL="system_u:object_r:container_file_t:s0"
        is "$output" "${RELABEL} $TESTDIR" "selinux relabel should have happened"
     fi
 
-    # Make sure that the K8s pause image isn't pulled but the local podman-pause is built.
-    run_podman images
-    run_podman 1 image exists k8s.gcr.io/pause
-    run_podman 1 image exists registry.k8s.io/pause
-    run_podman image exists $(pause_image)
-
     run_podman pod rm -t 0 -f $PODNAME
 }
 
@@ -158,7 +152,7 @@ RELABEL="system_u:object_r:container_file_t:s0"
     # Run `play kube` in the background as it will wait for the service
     # container to exit.
     timeout --foreground -v --kill=10 60 \
-        $PODMAN play kube --service-container=true --log-driver journald $TESTYAML &>/dev/null &
+        "${PODMAN_CMD[@]}" play kube --service-container=true --log-driver journald $TESTYAML &>/dev/null &
 
     # Wait for the container to be running
     container_a=$PODCTRNAME
@@ -575,7 +569,7 @@ EOF
     # Run `play kube` in the background as it will wait for the service
     # container to exit.
     timeout --foreground -v --kill=10 60 \
-        $PODMAN play kube --service-container=true --log-driver journald $TESTYAML &>/dev/null &
+        "${PODMAN_CMD[@]}" play kube --service-container=true --log-driver journald $TESTYAML &>/dev/null &
 
     # The name of the service container is predictable: the first 12 characters
     # of the hash of the YAML file followed by the "-service" suffix
@@ -668,7 +662,7 @@ spec:
     # on a running container; signaling during initialization
     # results in undefined behavior.
     logfile=$PODMAN_TMPDIR/kube-play.log
-    $PODMAN kube play --wait $fname &> $logfile &
+    "${PODMAN_CMD[@]}" kube play --wait $fname &> $logfile &
     local kidpid=$!
 
     for try in {1..10}; do
@@ -968,6 +962,56 @@ EOF
 
         run_podman kube down $fname
     done
+}
+
+# bats test_tags=ci:parallel
+@test "podman kube play healthcheck should wait initialDelaySeconds before executing healthcheck" {
+
+    # GIVEN a container with a liveness exec healthcheck with initialDelaySeconds that is quite long
+    podname="liveness-exec-$(safename)"
+    ctrname="liveness-ctr-$(safename)"
+
+    fname="$PODMAN_TMPDIR/play_kube_$(random_string 6).yaml"
+    cat <<EOF >$fname
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+  name: $podname
+spec:
+  containers:
+  - name: $ctrname
+    image: $IMAGE
+    args:
+    - /bin/sh
+    - -c
+    - sleep 100
+    livenessProbe:
+      exec:
+        # /tmp/healthy will exist in healthy container
+        command:
+        - /bin/sh
+        - -c
+        - touch /tmp/healthcheck.log
+      initialDelaySeconds: 100
+      failureThreshold: 1
+      periodSeconds: 1
+EOF
+
+    run_podman kube play $fname
+    ctrName="$podname-$ctrname"
+
+    # WHEN then healthcheck is executed
+    run_podman 1 healthcheck run $ctrName
+
+    # THEN the execution of the liveness probe should be skipped because initialDelaySeconds has not yet elapsed
+    run_podman 1 exec $ctrName test -e /tmp/healthcheck.log
+
+    # The sleep command does not respond to SIGTERM, so we have to use stop here.
+    # This is done to save time in the test suite.
+    run_podman stop -t0 $ctrName
+
+    run_podman kube down $fname
 }
 
 # CANNOT BE PARALLELIZED (YET): buildah#5674, parallel builds fail

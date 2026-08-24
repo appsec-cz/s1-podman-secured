@@ -362,7 +362,7 @@ EOF
     is "$output" "bar1.*bar2.*bar3" "Should match multiple source files on single destination directory"
 }
 
-# bats test_tags=distro-integration,ci:parallel
+# bats test_tags=ci:parallel
 @test "podman mount noswap memory mounts" {
     # tmpfs+noswap new in kernel 6.x, mid-2023; likely not in RHEL for a while
     if ! is_rootless; then
@@ -370,7 +370,7 @@ EOF
         mkdir $testmount
         run mount -t tmpfs -o noswap none $testmount
         if [[ $status -ne 0 ]]; then
-            if [[ $output =~ "bad option" ]]; then
+            if [[ $output =~ "bad option" ]] || [[ "$output" =~ "Unknown parameter" ]]; then
                 skip "requires kernel with tmpfs + noswap support"
             fi
             die "Could not test for tmpfs + noswap support: $output"

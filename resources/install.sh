@@ -87,6 +87,43 @@ fi
 echo "✓ All critical packages and binaries verified"
 
 echo ""
+echo "=== Upgrading the container stack from unstable ==="
+# Debian stable ships podman 5.4.2 and never moves; trixie-backports carries no
+# container packages at all, only the kernel. Unstable has podman 5.8.x, and the
+# upgrade is unusually contained: podman, crun, netavark, aardvark-dns and conmon,
+# with no libc or systemd pulled along.
+#
+# Unstable gets no security support, which is a real cost for this image. It is
+# limited as tightly as apt allows: unstable is pinned below stable, so nothing
+# else drifts, and only these five packages are taken from it explicitly.
+cat > /etc/apt/sources.list.d/containers-unstable.list <<'SOURCES'
+deb http://deb.debian.org/debian sid main
+SOURCES
+cat > /etc/apt/preferences.d/containers-unstable <<'PINNING'
+Package: *
+Pin: release a=unstable
+Pin-Priority: 100
+PINNING
+
+apt-get update -qq
+CONTAINER_STACK="podman crun netavark aardvark-dns conmon"
+echo "Before: $(dpkg-query -W -f='${Version}' podman 2>/dev/null)"
+
+if apt-get install -y -t sid $CONTAINER_STACK; then
+    for pkg in $CONTAINER_STACK; do
+        printf '  %s %s\n' "$pkg" "$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)"
+    done
+    echo "✓ Container stack upgraded from unstable"
+else
+    echo "WARNING: could not upgrade the container stack, keeping the stable versions"
+fi
+
+# The pin stays in the image on purpose: without it a later apt-get upgrade in
+# the running machine would have no idea these packages came from unstable and
+# would happily pull the rest of unstable along with them.
+apt-get update -qq
+
+echo ""
 echo "=== Installing a newer kernel from backports ==="
 # Debian stable ships 6.12; backports carries the kernel from the next release.
 # The image keeps exactly one kernel: the new one is installed, the stable one is

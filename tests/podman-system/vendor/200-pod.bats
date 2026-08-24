@@ -338,7 +338,7 @@ EOF
     # send a random string to the container. This will cause the container
     # to output the string to its logs, then exit.
     teststring=$(random_string 30)
-    echo "$teststring" | nc 127.0.0.1 $port_out
+    echo "$teststring" > /dev/tcp/127.0.0.1/$port_out
 
     # Confirm that the container log output is the string we sent it.
     run_podman wait $cid
@@ -589,7 +589,7 @@ io.max          | $lomajmin rbps=1048576 wbps=1048576 riops=max wiops=max
     done
 
     # and delete them
-    $PODMAN pod rm -a &
+    "${PODMAN_CMD[@]}" pod rm -a &
 
     # pod ps should not fail while pods are deleted
     run_podman pod ps -q
@@ -807,6 +807,14 @@ function thingy_with_unique_id() {
             die "the cgroup $cgroup_path should not exist after pod rm"
         fi
     done
+}
+
+@test "podman pod inspect ordering" {
+    local pod_name="p-$(safename)"
+    run_podman pod create $pod_name
+
+    run_podman pod inspect --format '{{ .SharedNamespaces }}' $pod_name
+    assert "$output" == "[ipc net uts]"
 }
 
 # vim: filetype=sh

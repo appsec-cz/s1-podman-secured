@@ -14,7 +14,6 @@ function setup() {
 
 #### DO NOT ADD ANY TESTS HERE! ADD NEW TESTS AT BOTTOM!
 
-# bats test_tags=distro-integration
 @test "podman version emits reasonable output" {
     run_podman version
 
@@ -37,7 +36,6 @@ function setup() {
     is "$output" "podman.*version \+"               "'Version line' in output"
 }
 
-# bats test_tags=distro-integration
 @test "podman info" {
     # These will be displayed on the test output stream, offering an
     # at-a-glance overview of important system configuration details
@@ -62,17 +60,20 @@ function setup() {
     if ! is_remote; then
         skip "only applicable on podman-remote"
     fi
+
     # All we care about here is that the command passes
     run_podman --context=default version
 
-    # This one must fail
-    PODMAN=${PODMAN%%--url*} run_podman 125 --context=swarm version
-    is "$output" \
-       "Error: read cli flags: connection \"swarm\" not found" \
-       "--context=swarm should fail"
+    (
+      unset REMOTESYSTEM_TRANSPORT
+      # This one must fail
+      PODMAN=${PODMAN%%--url*} run_podman 125 --context=swarm version
+      is "$output" \
+         "Error: read cli flags: connection \"swarm\" not found" \
+         "--context=swarm should fail"
+    )
 }
 
-# bats test_tags=distro-integration
 @test "podman can pull an image" {
     run_podman rmi -a -f
 
@@ -278,6 +279,15 @@ run_podman --noout system connection ls
     is "$output" ".*Shutting down engines.*"
     run_podman 125 --log-level=debug run dockah://rien.de/rien:latest
     is "$output" ".*Shutting down engines.*"
+}
+
+@test "release" {
+  [[ "${RELEASE_TESTING:-false}" == "true" ]] || \
+    skip "Release testing may be enabled by setting \$RELEASE_TESTING = 'true'."
+
+  run_podman --version
+
+  assert "$output" "!~" "dev" "The Podman version string does not mention 'dev'."
 }
 
 # vim: filetype=sh
