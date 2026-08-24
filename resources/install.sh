@@ -105,8 +105,12 @@ DEB_ARCH=$(dpkg --print-architecture)
 # version instead of guessing package names, or the old kernel's 169 MB
 # -unsigned package stays behind.
 kernel_packages() {
+    # dpkg-query exits non-zero as soon as one of the patterns matches nothing,
+    # and the stable kernel has no linux-modules-* or linux-binary-* package.
+    # With 'set -o pipefail' that status propagates and set -e kills the script
+    # right after the assignment - which is exactly how the first attempt failed.
     dpkg-query -Wf '${Package}\n' \
-        'linux-image-[0-9]*' 'linux-modules-[0-9]*' 'linux-binary-[0-9]*' 2>/dev/null | sort -u
+        'linux-image-[0-9]*' 'linux-modules-[0-9]*' 'linux-binary-[0-9]*' 2>/dev/null | sort -u || true
 }
 
 OLD_KERNEL_PKGS=$(kernel_packages | tr '\n' ' ')
@@ -118,7 +122,7 @@ apt-get update -qq
 if apt-get install -y -t trixie-backports "linux-image-$DEB_ARCH"; then
     # Highest version wins; ignore the -unsigned variants when picking it.
     NEW_VERSION=$(kernel_packages | grep '^linux-image-' | grep -v -- '-unsigned$' \
-        | sed 's/^linux-image-//' | sort -V | tail -1)
+        | sed 's/^linux-image-//' | sort -V | tail -1 || true)
 
     if [ -z "$NEW_VERSION" ]; then
         echo "ERROR: no versioned kernel package after the backports install"
@@ -142,7 +146,7 @@ if apt-get install -y -t trixie-backports "linux-image-$DEB_ARCH"; then
         *) echo "ERROR: the backports kernel is not installed after cleanup"; exit 1 ;;
     esac
 
-    VMLINUZ_COUNT=$(ls /boot/vmlinuz-* 2>/dev/null | wc -l)
+    VMLINUZ_COUNT=$(ls /boot/vmlinuz-* 2>/dev/null | wc -l || true)
     if [ "$VMLINUZ_COUNT" -ne 1 ]; then
         echo "ERROR: expected exactly one kernel in /boot, found $VMLINUZ_COUNT"
         ls -la /boot/vmlinuz-* 2>/dev/null || true
