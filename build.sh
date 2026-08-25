@@ -14,7 +14,12 @@ set -euo pipefail
 ARCH="${ARCH:-$(uname -m)}"
 IMAGE_SIZE="${IMAGE_SIZE:-10G}"
 IMAGE_NAME="${IMAGE_NAME:-podman-debian}"
-INSTALL_SENTINELONE="${INSTALL_SENTINELONE:-1}"
+# The agent is licensed per endpoint and is not redistributable, so it stays out
+# of any image that leaves this machine. Images are built without it and the
+# agent is installed at deployment time from a copy the operator already holds
+# (see docs/deployment-jamf.md). Set INSTALL_SENTINELONE=1 only for an image that
+# will not be distributed.
+INSTALL_SENTINELONE="${INSTALL_SENTINELONE:-0}"
 SENTINELONE_TOKEN="${SENTINELONE_TOKEN:-}"
 VERBOSE="${VERBOSE:-0}"
 DEBUG_BUILD="${DEBUG_BUILD:-0}"

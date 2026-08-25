@@ -234,11 +234,20 @@ deploy_sentinelone() {
     # Register if token provided
     if [ -n "$S1_TOKEN" ]; then
         echo "  Registering agent..."
-        podman machine ssh "$MACHINE_NAME" "sudo bash -c '
-            /opt/sentinelone/bin/sentinelctl management token set \"$S1_TOKEN\" 2>/dev/null || true
-            systemctl enable sentinelone 2>/dev/null || true
-            systemctl start sentinelone 2>/dev/null || true
-        '"
+        podman machine ssh "$MACHINE_NAME" "sudo /opt/sentinelone/bin/sentinelctl management token set \"$S1_TOKEN\"" >/dev/null 2>&1 || \
+            echo -e "${YELLOW}  Token could not be set - register manually with sentinelctl${NC}"
+    fi
+
+    # Start it whether or not a token was given. Installing the package enables
+    # the unit but does not start it, so without this the agent sits idle until
+    # the machine is rebooted - and an unregistered agent still needs to be
+    # running for the token to be applied later.
+    podman machine ssh "$MACHINE_NAME" "sudo systemctl enable --now sentinelone" >/dev/null 2>&1 || true
+    sleep 2
+    if [ "$(podman machine ssh "$MACHINE_NAME" 'systemctl is-active sentinelone' 2>/dev/null | tr -d '\r')" = "active" ]; then
+        echo -e "${GREEN}  Agent running${NC}"
+    else
+        echo -e "${YELLOW}  WARNING: the agent is installed but not running${NC}"
     fi
 
     # Cleanup

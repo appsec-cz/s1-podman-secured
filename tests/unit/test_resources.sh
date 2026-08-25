@@ -207,4 +207,23 @@ test_bootloader_verification_present() {
     assert_eq "2" "$calls" "the bootloader is verified both after conversion and after customization"
 }
 
+test_documentation_links_resolve() {
+    # Docs rot quietly; a link to a file that was renamed is worse than no link.
+    local doc target missing=0
+    while IFS= read -r doc; do
+        while IFS= read -r target; do
+            case "$target" in
+                http*|"#"*) continue ;;
+            esac
+            target="${target%%#*}"
+            [ -n "$target" ] || continue
+            if [ ! -e "$(dirname "$doc")/$target" ]; then
+                t_fail "link resolves: $target" "referenced from $(basename "$doc")"
+                missing=1
+            fi
+        done < <(grep -oE '\]\([^)]+\)' "$doc" | sed -E 's/^\]\(//; s/\)$//')
+    done < <(find "$ROOT/docs" "$ROOT" -maxdepth 1 -name '*.md' 2>/dev/null; find "$ROOT/docs" -name '*.md' 2>/dev/null)
+    [ "$missing" -eq 0 ] && t_pass "every relative link in the documentation resolves"
+}
+
 run_tests
