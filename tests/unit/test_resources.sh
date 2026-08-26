@@ -207,6 +207,29 @@ test_bootloader_verification_present() {
     assert_eq "2" "$calls" "the bootloader is verified both after conversion and after customization"
 }
 
+test_image_carries_no_machine_identity() {
+    # A host key or machine-id created by the build is shared by every machine
+    # deployed from the image. The build must not create them, and must strip
+    # anything that put them back.
+    local install
+    install=$(cat "$ROOT/resources/install.sh")
+
+    assert_not_contains "$(grep -vE '^[[:space:]]*#' "$ROOT/resources/install.sh")" "ssh-keygen -A" \
+        "the build does not generate host keys"
+    assert_contains "$install" "rm -f /etc/ssh/ssh_host_*" \
+        "the build removes any host keys before finishing"
+    assert_contains "$install" ": > /etc/machine-id" \
+        "the build clears the machine-id"
+
+    # ...and something has to create them on the machine, without depending on
+    # systemd's first-boot detection.
+    local dropin="$ROOT/resources/configs/ssh-hostkeys.conf"
+    assert_file_exists "$dropin" "the ssh host key drop-in exists"
+    assert_contains "$(cat "$dropin")" "ssh-keygen -A" "the drop-in generates host keys"
+    assert_matches "$(cat "$dropin")" 'ExecStartPre=$' "the drop-in resets sshd's own ExecStartPre"
+    assert_contains "$install" "10-hostkeys.conf" "install.sh installs the drop-in"
+}
+
 test_documentation_links_resolve() {
     # Docs rot quietly; a link to a file that was renamed is worse than no link.
     local doc target missing=0

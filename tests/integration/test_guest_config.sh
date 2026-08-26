@@ -128,6 +128,27 @@ test_user_can_read_journal() {
     assert_contains "$groups" "systemd-journal" "the machine user can read the journal"
 }
 
+test_machine_identity_is_its_own() {
+    # Host keys and machine-id must have been created by this machine, not by the
+    # build - otherwise every deployment from the image shares them.
+    local built keytime
+    built=$(guest 'stat -c %Y /var/log/image-build-install.log 2>/dev/null || echo 0' 2>/dev/null | tr -d '\r')
+    keytime=$(guest 'stat -c %Y /etc/ssh/ssh_host_ed25519_key 2>/dev/null || echo 0' 2>/dev/null | tr -d '\r')
+
+    if [ "${keytime:-0}" -eq 0 ]; then
+        t_fail "the machine has its own ssh host key" "no host key at all - sshd cannot be running"
+    elif [ "${keytime:-0}" -gt "${built:-0}" ]; then
+        t_pass "the ssh host key was generated on the machine, not in the image"
+    else
+        t_fail "the ssh host key was generated on the machine, not in the image" \
+            "the key predates the image build, so every deployment shares it"
+    fi
+
+    local mid
+    mid=$(guest 'cat /etc/machine-id 2>/dev/null' 2>/dev/null | tr -d '\r')
+    assert_matches "$mid" '^[0-9a-f]{32}$' "the machine has a machine-id"
+}
+
 test_services_are_healthy() {
     local svc state
     for svc in ssh.service podman.socket; do

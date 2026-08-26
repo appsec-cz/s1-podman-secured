@@ -73,6 +73,7 @@ REQUIRED_FILES=(
     "$RESOURCES_DIR/configs/10-vz-nat.network"
     "$RESOURCES_DIR/configs/delegate.conf"
     "$RESOURCES_DIR/configs/podman-machine.conf"
+    "$RESOURCES_DIR/configs/ssh-hostkeys.conf"
 )
 
 echo "Validating resources..."

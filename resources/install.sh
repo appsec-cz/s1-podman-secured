@@ -255,10 +255,21 @@ echo "✓ Network configuration installed"
 mkdir -p /etc/ssh/sshd_config.d
 install -m 644 "$RESOURCES/configs/podman-machine.conf" /etc/ssh/sshd_config.d/podman-machine.conf
 
+# Host keys are generated on the machine, not in the image. Debian's own
+# sshd-keygen.service would do it, but only on a systemd "first boot", which
+# depends on /etc/machine-id being empty - too fragile a thing to hang sshd on.
+# This drop-in runs the generator before sshd's own config test, every start, and
+# ssh-keygen -A only creates what is missing.
+mkdir -p /etc/systemd/system/ssh.service.d
+install -m 644 "$RESOURCES/configs/ssh-hostkeys.conf" /etc/systemd/system/ssh.service.d/10-hostkeys.conf
+
 # Disable systemd-ssh-generator (Debian 13 creates vsock/unix sockets, we need TCP)
 mkdir -p /etc/systemd/system-generators
 ln -sf /dev/null /etc/systemd/system-generators/systemd-ssh-generator
-ssh-keygen -A
+# No host keys are generated here on purpose. The build has no use for them -
+# virt-customize works through libguestfs, not ssh - and a key baked into the
+# image would be shared by every machine deployed from it. They are created on
+# the machine itself, see the ssh.service drop-in below.
 systemctl enable ssh.service
 echo "✓ SSH configuration installed"
 
@@ -346,6 +357,21 @@ if [ -f /tmp/s1.deb ]; then
 
     rm -f /tmp/s1.deb
 fi
+
+echo ""
+echo "=== Preparing the image for cloning ==="
+# Anything that identifies a machine has to be created by the machine, not by the
+# build - otherwise every deployment from this image shares it. This runs last so
+# nothing installed above can put them back.
+rm -f /etc/ssh/ssh_host_*
+echo "✓ SSH host keys removed (generated on first start)"
+
+if [ -f /etc/machine-id ]; then
+    : > /etc/machine-id
+    echo "✓ machine-id cleared (generated on first boot)"
+fi
+rm -f /var/lib/dbus/machine-id
+rm -f /var/lib/systemd/random-seed
 
 echo ""
 echo "========================================"
