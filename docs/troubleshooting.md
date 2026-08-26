@@ -25,6 +25,23 @@ curl -s -X POST -H 'Content-Type: application/json' -d '{"state":"HardStop"}' \
   "$(podman machine inspect <machine> --format '{{.AppleHypervisor.Vfkit.Endpoint}}')/vm/state"
 ```
 
+## `podman machine start` fails with `ssh: handshake failed: EOF`
+
+The VM boots - the serial console shows a Debian login prompt - but ssh never
+answers, so podman gives up after about twenty seconds and kills gvproxy. Trying
+again usually works; when it does not, leftover processes from a previous stop
+are in the way:
+
+```bash
+pkill -f 'vfkit.*podman-machine-default'
+pkill -f gvproxy
+podman machine start podman-machine-default
+```
+
+Seen repeatedly on this host, always after a stop, and always cured by clearing
+those processes and retrying. The machine test layer retries once for the same
+reason and reports when it had to.
+
 ## Every `podman machine` command says `unknown machine state:`
 
 Podman picks the port for vfkit's REST endpoint without checking whether it is

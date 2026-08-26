@@ -113,11 +113,24 @@ test_07_stop_and_start_again() {
     fi
     t_pass "the machine stops cleanly"
 
+    # Starting a machine again after a stop is intermittently flaky on this host:
+    # the guest boots to a login prompt but ssh never answers, podman gives up
+    # with "ssh: handshake failed: EOF" and tears gvproxy down. Killing the
+    # leftover processes and trying once more has always worked. Retry, and say
+    # so - a retry that works is a host problem worth seeing, not an image one.
     if podman machine start "$TEST_MACHINE" >/dev/null 2>&1 && machine_wait_ssh; then
         t_pass "the machine starts again after a stop"
     else
-        t_fail "the machine starts again after a stop" "second boot failed"
-        return
+        pkill -f "vfkit.*$TEST_MACHINE" 2>/dev/null
+        pkill -f gvproxy 2>/dev/null
+        sleep 5
+        if podman machine start "$TEST_MACHINE" >/dev/null 2>&1 && machine_wait_ssh; then
+            t_pass "the machine starts again after a stop"
+            t_info "the first start failed; it worked after clearing stale vfkit/gvproxy processes"
+        else
+            t_fail "the machine starts again after a stop" "second boot failed twice"
+            return
+        fi
     fi
 
     # Second boot must not re-run Ignition; podman only serves the config once.
