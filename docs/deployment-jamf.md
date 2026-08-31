@@ -284,10 +284,20 @@ A smart group on "agent state is not active" is the one worth alerting on.
 
 ## Step 6 - updating
 
-**A new image** means a new machine: the disk is replaced, so containers, images
-and volumes inside are lost. Treat it as a rebuild, announce it, and prefer Self
-Service so the user picks the moment. Deploy the new package, then run the deploy
-policy with `replace`.
+**A new image** means a new machine: the disk is replaced. Pass `--preserve` and
+the user's images, volumes and containers are exported first and restored into
+the new machine, so the update costs them a restart rather than their work:
+
+```bash
+as_user "$DIR/deploy.sh" --preserve --token "${4:-}"
+```
+
+`--preserve` also removes the old machine without asking, which a policy needs -
+there is no terminal to answer a prompt. It needs about as much free disk as the
+container store occupies, and it does not carry kind clusters or the agent's
+registration; see [usage.md](usage.md#keeping-your-data-across-a-new-image).
+Without `--preserve` the contents are lost, so treat that as a rebuild, announce
+it, and prefer Self Service so the user picks the moment.
 
 **A new agent, same image** does not need a new machine. A small policy is
 enough:

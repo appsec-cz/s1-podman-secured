@@ -148,7 +148,66 @@ podman machine inspect --format '{{.Rosetta}} {{.Resources.CPUs}} {{.Resources.M
 ```
 
 CPUs, memory and disk are fixed when the machine is created. Changing them means
-deploying again, which destroys the current machine's contents.
+deploying again, which destroys the current machine's contents - unless you ask
+for them to be carried across.
+
+## Keeping your data across a new image
+
+`podman machine rm` takes the disk with it, so a plain redeploy costs every
+image, volume and container in the machine. `--preserve` exports them first and
+puts them back afterwards:
+
+```bash
+./deploy.sh --preserve --token <site-token>
+```
+
+The two halves also stand on their own, which is useful before doing anything
+drastic by hand:
+
+```bash
+./deploy.sh --backup-only            # prints the directory it wrote
+./deploy.sh --restore <directory>
+```
+
+Backups live in `~/.local/share/containers/podman/machine/backups/`. A restore
+that verifies deletes the backup it came from, because at that point the data
+exists twice and the copy in the machine is the one being used. Pass
+`--keep-backup` to hold on to it anyway.
+
+What travels:
+
+- **Images** through `podman save`, all of them that carry a name.
+- **Volumes** through `podman volume export`, recreated first with the driver,
+  labels and options they had.
+- **Containers** through `podman kube generate --podman-only`, which keeps the
+  settings plain Kubernetes YAML cannot express. One file per container, because
+  generating them together would put them in one pod and hand them a shared
+  network namespace they never had.
+- **Running state** - what was running is started again, what was stopped stays
+  stopped.
+
+What does not:
+
+- **kind nodes.** A node is a running kubelet with etcd behind it, and replaying
+  its definition does not give back a working cluster. They are listed and
+  skipped; rebuild those clusters with kind.
+- **Anything `podman kube generate` cannot express.** Such containers are named
+  in the output and their full state is kept in `containers.json` inside the
+  backup, to rebuild by hand.
+- **Standalone-ness.** Podman always generates a pod, so a restored container
+  comes back inside a pod of its own and `podman ps -a` gains an infra container
+  next to it. `--no-pod-prefix` keeps the container under its original name, and
+  ports, mounts and restart policy all behave as before, but the shape is a pod
+  rather than a lone container.
+- **The SentinelOne agent's identity.** Anti-tamper protects
+  `/opt/sentinelone/configuration`, and a copied UUID registers as a cloned
+  agent. The new machine registers itself with `--token`, so the console ends up
+  with two endpoints of the same name - the summary prints the site key of the
+  old one to decommission.
+
+The store is exported straight onto the Mac: `$HOME` is under `/Users`, which the
+machine mounts at the same path, so gigabytes never travel through the ssh
+connection. Expect to need about as much free space as the store occupies.
 
 ## What is deliberately absent
 

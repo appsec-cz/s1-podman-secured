@@ -30,10 +30,13 @@ your licensed agent package:
 ```bash
 ./deploy.sh                      # image and agent auto-detected
 ./deploy.sh --token <site-token> # and register the agent
+./deploy.sh --preserve --token <site-token>   # and keep what is in the old machine
 ```
 
 That creates `podman-machine-default`, turns on Rosetta, installs the agent and
-starts it. Everything after that is ordinary podman:
+starts it. A new image otherwise means a new disk, so `--preserve` exports the
+images, volumes and containers of the machine it replaces and puts them back -
+see [docs/usage.md](docs/usage.md#keeping-your-data-across-a-new-image). Everything after that is ordinary podman:
 
 ```bash
 podman run --rm alpine echo hello

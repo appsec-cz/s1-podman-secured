@@ -40,6 +40,16 @@ This is the layer that tells you the configuration is not just present but in
 effect - btrfs really in use, Rosetta really translating, ports really reaching
 macOS, `podman logs` really returning output.
 
+**After touching backup or restore**, the round trip on a throwaway machine:
+
+```bash
+./tests/run.sh migration
+```
+
+Destructive, and the only thing that proves it: each half looks fine alone - a
+backup that writes files, and a restore that reports success while the data it
+was meant to bring back is not there.
+
 **Before shipping an image to a fleet**, everything:
 
 ```bash

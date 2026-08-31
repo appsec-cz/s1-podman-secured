@@ -7,6 +7,7 @@
 #   ./tests/run.sh unit image      several
 #   ./tests/run.sh all             everything, including the destructive layers
 #   ./tests/run.sh machine         lifecycle on a throwaway machine (destructive)
+#   ./tests/run.sh migration      data across a machine replacement (destructive)
 #   ./tests/run.sh podman-system   podman's own suite in a throwaway machine (destructive)
 #
 # Environment:
@@ -23,7 +24,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BLUE='\033[0;34m'; GREEN='\033[0;32m'; RED='\033[0;31m'; BOLD='\033[1m'; NC='\033[0m'
 
 DEFAULT_LAYERS=(unit image integration)
-ALL_LAYERS=(unit image integration machine podman-system)
+ALL_LAYERS=(unit image integration machine migration podman-system)
 
 layers=("$@")
 if [ ${#layers[@]} -eq 0 ]; then
@@ -39,6 +40,7 @@ run_layer_unit() {
     local rc=0
     (cd "$HERE/unit" && python3 -m unittest discover -p 'test_*.py' -v 2>&1 | tail -5) || rc=1
     "$HERE/unit/test_resources.sh" || rc=1
+    "$HERE/unit/test_deploy.sh" || rc=1
     return $rc
 }
 
@@ -58,6 +60,10 @@ run_layer_machine() {
     "$HERE/machine/test_lifecycle.sh"
 }
 
+run_layer_migration() {
+    "$HERE/machine/test_migration.sh"
+}
+
 run_layer_podman_system() {
     "$HERE/podman-system/run.sh"
 }
@@ -69,6 +75,7 @@ for layer in "${layers[@]}"; do
         image)         run_layer_image ;;
         integration)   run_layer_integration ;;
         machine)       run_layer_machine ;;
+        migration)     run_layer_migration ;;
         podman-system) run_layer_podman_system ;;
         *) printf 'unknown layer: %s\n' "$layer"; exit 2 ;;
     esac || failed_layers+=("$layer")
