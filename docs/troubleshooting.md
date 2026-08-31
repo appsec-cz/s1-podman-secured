@@ -20,6 +20,34 @@ report usually points straight at the entry below that explains it. A guest buil
 before this existed has no such command; the same checks run from the repository
 with `./tests/run.sh integration`.
 
+### When ssh does not answer
+
+All of the above needs a working `podman machine ssh`. When that is exactly what
+is broken, read the machine's serial log on the Mac instead - vfkit writes it
+whether or not the guest is cooperating:
+
+```bash
+tail -f "$TMPDIR/podman/<machine>.log"
+```
+
+The machine writes a one line verdict there at the end of boot and whenever
+something changes:
+
+```
+podman-machine-health: ok units=ok podman=ok/4running storage=btrfs net=192.168.127.2 journal=ok up=1554s
+podman-machine-health: FAULT(1) units=ok podman=ok/0running storage=overlay net=192.168.127.2 journal=blind up=61s
+```
+
+`journal=blind` is the failure below that makes `podman logs` silently empty;
+`storage=` anything but btrfs means the config did not take effect; `podman=
+unresponsive` means the runtime is gone even though the machine is up.
+
+A machine that is idle and well does not keep writing, so an old timestamp is not
+itself a symptom. There is deliberately no queryable endpoint: podman gives the VM
+a single vsock device on port 1025, and the socket behind it exists only while
+`podman machine start` is waiting for the ready signal, so there is nothing on the
+host to ask afterwards.
+
 ## `podman machine start` hangs forever, then the machine will not even stop
 
 `podman machine stop` times out too, and the VM sits at 0% CPU. The serial log

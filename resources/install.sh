@@ -206,6 +206,7 @@ install -m 755 "$RESOURCES/scripts/podman-machine-ready.sh" /usr/local/bin/podma
 # Named without the .sh so it reads as a command when run by hand, which is most
 # of what it is for.
 install -m 755 "$RESOURCES/scripts/machine-diagnostics.sh" /usr/local/bin/podman-machine-diagnostics
+install -m 755 "$RESOURCES/scripts/machine-health.sh" /usr/local/bin/podman-machine-health
 install -m 755 "$RESOURCES/scripts/rosetta-activate.sh" /usr/local/bin/rosetta-activate.sh
 echo "✓ Scripts installed"
 
@@ -215,10 +216,13 @@ install -m 644 "$RESOURCES/services/ignition-provider.service" /etc/systemd/syst
 install -m 644 "$RESOURCES/services/post-ignition-setup.service" /etc/systemd/system/
 install -m 644 "$RESOURCES/services/podman-machine-ready.service" /etc/systemd/system/
 install -m 644 "$RESOURCES/services/rosetta-activation.service" /etc/systemd/system/
+install -m 644 "$RESOURCES/services/podman-machine-health.service" /etc/systemd/system/
+install -m 644 "$RESOURCES/services/podman-machine-health.timer" /etc/systemd/system/
 
 systemctl enable ignition-provider.service
 systemctl enable post-ignition-setup.service
 systemctl enable podman-machine-ready.service
+systemctl enable podman-machine-health.timer
 # Note: rosetta-activation.service is NOT enabled - Ignition will enable it when requested
 echo "✓ Services installed"
 

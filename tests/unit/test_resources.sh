@@ -171,6 +171,38 @@ test_diagnostics_are_installed_by_install_sh() {
         "machine-diagnostics.sh" "install.sh installs the diagnostics script"
 }
 
+test_health_uses_the_channel_that_survives() {
+    # A vsock endpoint is not available: podman gives the VM one vsock device,
+    # port 1025, and the unix socket behind it exists only while machine start
+    # waits for the ready signal. The serial console is what is left, and
+    # /dev/console is tty0 here - not the port vfkit captures.
+    local health
+    health=$(cat "$ROOT/resources/scripts/machine-health.sh")
+    assert_contains "$health" "/dev/hvc0" "the health report goes to the captured serial port"
+    assert_not_contains "$health" 'CONSOLE:-/dev/console' "and not to /dev/console, which reaches nobody"
+
+    # The Groups line in /proc/PID/status is tab separated; splitting on spaces
+    # alone leaves "Groups:<tab>999" glued and reports every machine as blind.
+    assert_contains "$health" "awk '/^Groups:/ {\$1=\"\"; print}'" \
+        "the journal check strips the label before splitting"
+}
+
+test_health_does_not_grow_the_host_log_forever() {
+    local health
+    health=$(cat "$ROOT/resources/scripts/machine-health.sh")
+    assert_contains "$health" "HEARTBEAT_SECONDS" "an idle machine only reports on a heartbeat"
+    assert_contains "$health" "up=[0-9]*s//" \
+        "uptime is excluded from the comparison, or nothing ever looks unchanged"
+}
+
+test_health_is_installed_and_scheduled() {
+    local install
+    install=$(cat "$ROOT/resources/install.sh")
+    assert_contains "$install" "machine-health.sh" "install.sh installs the health reporter"
+    assert_contains "$install" "systemctl enable podman-machine-health.timer" \
+        "and enables the timer that keeps it reporting"
+}
+
 test_policy_json_fallback() {
     # Regression: with /etc/containers shadowed, no image could be pulled at all.
     assert_contains "$(cat "$ROOT/resources/scripts/post-ignition-setup.sh")" \

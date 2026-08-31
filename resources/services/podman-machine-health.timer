@@ -1,0 +1,14 @@
+[Unit]
+Description=Report machine health to the host periodically
+Documentation=file:///usr/local/bin/podman-machine-health
+
+[Timer]
+# A machine that was fine at boot and went bad an hour later leaves a trail in
+# the host's serial log. The report only writes when something changed or the
+# heartbeat is due, so the log does not grow for a machine that is simply idle.
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

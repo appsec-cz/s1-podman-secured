@@ -85,4 +85,10 @@ if [ -x /usr/local/bin/podman-machine-diagnostics ]; then
     fi
 fi
 
+# First beat on the serial console, so the host has a verdict about this machine
+# even if ssh never becomes usable. The timer takes over from here.
+if [ -x /usr/local/bin/podman-machine-health ]; then
+    /usr/local/bin/podman-machine-health || true
+fi
+
 logger "podman-machine-ready: boot complete in $((SECONDS - BOOT_START))s"

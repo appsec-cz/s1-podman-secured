@@ -228,4 +228,47 @@ test_diagnostics_are_installed() {
     fi
 }
 
+test_health_report_reaches_the_host() {
+    # The whole point is that this works without the machine's cooperation, so
+    # assert the line lands in the file vfkit writes on the Mac - not merely that
+    # the script ran.
+    local repo_script log before after line
+    repo_script="$HERE/../../resources/scripts/machine-health.sh"
+    log="${TMPDIR:-/tmp}/podman/${MACHINE}.log"
+
+    if [ ! -r "$log" ]; then
+        t_skip "the health report reaches the host serial log" "no console log at $log"
+        return
+    fi
+
+    guest 'cat > /tmp/machine-health.sh && chmod +x /tmp/machine-health.sh' \
+        < "$repo_script" >/dev/null 2>&1
+
+    line=$(guest 'sudo /tmp/machine-health.sh --stdout' 2>&1 | tr -d '\r')
+    assert_contains "$line" "podman-machine-health:" "the health reporter produces a line"
+    assert_contains "$line" "journal=ok" "it sees journal access for rootless podman"
+    assert_contains "$line" "storage=btrfs" "it sees the btrfs store"
+
+    before=$(wc -c < "$log" 2>/dev/null | tr -d ' ')
+    guest 'sudo rm -f /run/podman-machine-health.last; sudo /tmp/machine-health.sh' >/dev/null 2>&1
+    sleep 2
+    after=$(wc -c < "$log" 2>/dev/null | tr -d ' ')
+
+    if [ "${after:-0}" -gt "${before:-0}" ]; then
+        t_pass "the health report reaches the host serial log"
+    else
+        t_fail "the health report reaches the host serial log" \
+            "$log did not grow ($before -> $after) - /dev/hvc0 is not the captured port"
+    fi
+
+    # Writing every beat would grow that log forever.
+    before=$after
+    guest 'sudo /tmp/machine-health.sh' >/dev/null 2>&1
+    sleep 2
+    after=$(wc -c < "$log" 2>/dev/null | tr -d ' ')
+    assert_eq "$before" "$after" "an unchanged machine does not write again"
+
+    guest 'rm -f /tmp/machine-health.sh' >/dev/null 2>&1
+}
+
 run_tests

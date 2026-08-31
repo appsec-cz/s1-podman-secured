@@ -1,0 +1,12 @@
+[Unit]
+Description=Podman Machine Health Report
+# Reports over the serial console, which is the one channel that still works
+# when ssh, the network and podman are gone. Nothing else depends on it.
+After=podman-machine-ready.service
+Documentation=file:///usr/local/bin/podman-machine-health
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/podman-machine-health
+# Never let a health report be the thing that fails a boot.
+SuccessExitStatus=0 1

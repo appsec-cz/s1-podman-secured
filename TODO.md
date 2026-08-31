@@ -115,22 +115,17 @@ Copy host certificates into the VM for private registry access:
 - source: host certificate store via virtiofs
 - destination: `/etc/containers/certs.d/`
 
-### 6. Health check endpoint
-
-A vsock endpoint reporting systemd service status and container runtime status,
-to make stuck machines diagnosable from the host.
-
-### 7. Volume mount validation at build time
+### 6. Volume mount validation at build time
 
 Warn about forbidden mount paths: `/bin`, `/boot`, `/dev`, `/etc`, `/home`,
 `/proc`, `/root`, `/run`, `/sbin`, `/sys`, `/tmp`, `/usr`, `/var`.
 
-### 8. Ansible playbook support
+### 7. Ansible playbook support
 
 Support `--playbook` from `podman machine init`: install Ansible in the base
 image and run the playbook after Ignition completes.
 
-### 9. Machine inspection endpoint
+### 8. Machine inspection endpoint
 
 Report machine configuration, resource usage and installed packages for
 `podman machine inspect` compatibility.
@@ -179,6 +174,17 @@ Report machine configuration, resource usage and installed packages for
   recognises the machine marker. Fixing the marker fixed forwarding.
 - **Timezone support.** Handled - Ignition sets `/etc/localtime` and the provider
   applies it.
+- **No way to ask a stuck machine how it was doing.** Wanted as a vsock endpoint;
+  that turned out to be impossible, not merely awkward. Podman gives the VM one
+  vsock device, port 1025, and the unix socket behind it exists only while
+  `podman machine start` waits for the ready signal - afterwards there is nothing
+  on the host to connect to, and vfkit's arguments are podman's to choose.
+  `podman-machine-health` therefore reports over the serial console, which vfkit
+  captures to a file on the Mac and which keeps working when ssh, the network and
+  podman are gone. Note that `/dev/console` is `tty0` in this guest and is not
+  that port, so `StandardOutput=console` reaches nobody; it has to be
+  `/dev/hvc0`. One line at the end of boot, then on change or a heartbeat, so an
+  idle machine does not grow the host's log.
 - **Nothing to look at when a machine came up wrong.** Every failure above is
   silent: the machine boots, podman answers, and only some later operation
   behaves strangely. `podman-machine-diagnostics` now runs at the end of every
