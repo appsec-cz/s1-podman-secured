@@ -94,20 +94,7 @@ expectations) behave differently. `podman machine set --rootful` switches it; if
 that is ever done, `/run/docker.sock` has to be repointed at
 `/run/podman/podman.sock`.
 
-### 4. Fallback podman.socket enablement
-
-**File**: `resources/scripts/post-ignition-setup.sh`
-
-Enable the user's `podman.socket` if Ignition did not. Podman Desktop sends it in
-the config, so this is only a reliability net.
-
-```bash
-if ! systemctl --user is-enabled podman.socket &>/dev/null; then
-    systemctl --user enable --now podman.socket
-fi
-```
-
-### 5. SSL certificate handling
+### 4. SSL certificate handling
 
 **Impact**: enterprise users with private registries
 
@@ -115,7 +102,7 @@ Copy host certificates into the VM for private registry access:
 - source: host certificate store via virtiofs
 - destination: `/etc/containers/certs.d/`
 
-### 6. Machine inspection endpoint
+### 5. Machine inspection endpoint
 
 Report machine configuration, resource usage and installed packages for
 `podman machine inspect` compatibility.
@@ -164,6 +151,15 @@ Report machine configuration, resource usage and installed packages for
   recognises the machine marker. Fixing the marker fixed forwarding.
 - **Timezone support.** Handled - Ignition sets `/etc/localtime` and the provider
   applies it.
+- **Nothing enabled `podman.socket` if Ignition did not.** That socket is what
+  the podman client on the Mac connects to, so losing it loses the machine
+  entirely. `post-ignition-setup` now writes the wants symlink itself when
+  neither location Ignition uses has one. Not with `systemctl --user`, as first
+  sketched: the script runs as root, where `--user` has no user manager to talk
+  to, and the unit is ordered before user sessions so the manager may not exist
+  yet - and waiting on a systemd job from inside that unit is what deadlocked it
+  against sshd once already. The symlink is exactly what `enable` writes and
+  needs nothing running.
 - **`podman machine init --playbook` did nothing.** The image now carries
   `ansible-core`, but installing it was the smaller half. Podman writes
   `playbook.service` for Fedora CoreOS and gates it on `ConditionFirstBoot=yes`,

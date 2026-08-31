@@ -108,6 +108,30 @@ if getent group systemd-journal > /dev/null 2>&1; then
     fi
 fi
 
+# podman.socket for the machine user
+# This is the socket the podman client on the Mac connects to; without it nothing
+# on the host can reach this machine at all. Podman Desktop sends the enablement
+# in the Ignition config and the provider applies it, so this is only a net for
+# the case where that did not happen - but the failure is total, so it earns one.
+#
+# Written as the symlink "systemctl --user enable" would create, not by calling
+# it: this script runs as root, where --user has no user manager to talk to, and
+# the unit is ordered before user sessions so the manager may not exist yet.
+# The link is picked up when the manager starts, and needs nothing running now.
+PODMAN_SOCKET_UNIT=/usr/lib/systemd/user/podman.socket
+SYSTEM_WANTS=/etc/systemd/user/sockets.target.wants
+USER_WANTS="$USER_HOME/.config/systemd/user/sockets.target.wants"
+
+if [ ! -f "$PODMAN_SOCKET_UNIT" ]; then
+    logger "post-ignition-setup: WARNING no $PODMAN_SOCKET_UNIT - podman is not installed?"
+elif [ -e "$SYSTEM_WANTS/podman.socket" ] || [ -e "$USER_WANTS/podman.socket" ]; then
+    logger "post-ignition-setup: podman.socket already enabled (skipping)"
+else
+    mkdir -p "$SYSTEM_WANTS"
+    ln -sf "$PODMAN_SOCKET_UNIT" "$SYSTEM_WANTS/podman.socket"
+    logger "post-ignition-setup: enabled podman.socket - Ignition did not"
+fi
+
 # Container image trust policy
 # Podman 6 mounts the host's ~/.config/containers over /etc/containers inside the
 # VM, which hides /etc/containers/policy.json. Without a policy file podman cannot

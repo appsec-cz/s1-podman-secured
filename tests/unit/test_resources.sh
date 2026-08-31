@@ -243,6 +243,33 @@ test_ansible_is_in_the_image() {
         "the image carries ansible-core for --playbook"
 }
 
+test_podman_socket_fallback() {
+    # Without this socket nothing on the Mac can reach the machine at all, so a
+    # config that failed to enable it is a total failure - worth a net even
+    # though Podman Desktop always sends it.
+    local script
+    script=$(cat "$ROOT/resources/scripts/post-ignition-setup.sh")
+    assert_contains "$script" 'ln -sf "$PODMAN_SOCKET_UNIT" "$SYSTEM_WANTS/podman.socket"' \
+        "the fallback enables podman.socket by writing the wants symlink"
+
+    # "systemctl --user" cannot work here: the script runs as root, where --user
+    # has no user manager to talk to, and the unit is ordered before user
+    # sessions so the manager may not exist yet. Waiting on a job from inside
+    # this unit is also how it deadlocked against sshd once.
+    local user_calls
+    user_calls=$(printf '%s\n' "$script" | grep -vE '^\s*#' | grep -F 'systemctl --user' || true)
+    if [ -z "$user_calls" ]; then
+        t_pass "and never by asking a user manager that may not be running"
+    else
+        t_fail "and never by asking a user manager that may not be running" "$user_calls"
+    fi
+
+    # Ignition may enable it in either location; creating a second link would be
+    # harmless but claiming Ignition had not done it would be a lie in the log.
+    assert_contains "$script" '[ -e "$SYSTEM_WANTS/podman.socket" ] || [ -e "$USER_WANTS/podman.socket" ]' \
+        "both places Ignition may have enabled it are checked first"
+}
+
 test_policy_json_fallback() {
     # Regression: with /etc/containers shadowed, no image could be pulled at all.
     assert_contains "$(cat "$ROOT/resources/scripts/post-ignition-setup.sh")" \
