@@ -70,7 +70,9 @@ AllowTcpForwarding yes
 StreamLocalBindUnlink yes
 SSHEOF
     logger "post-ignition-setup: SSH StreamLocal forwarding enabled"
-    systemctl reload ssh.service 2>/dev/null || true
+    # --no-block or this deadlocks: the unit is ordered before user sessions and
+    # systemd will not run an ssh job while this script is still running.
+    systemctl reload ssh.service --no-block 2>/dev/null || true
 else
     logger "post-ignition-setup: SSH StreamLocal already configured (skipping)"
 fi
@@ -96,7 +98,9 @@ if getent group systemd-journal > /dev/null 2>&1; then
         # service inside it - would go on reading nothing from the journal. The
         # unit ordering should prevent that; restart it if it happened anyway.
         if systemctl is-active --quiet "user@$USER_UID.service"; then
-            systemctl restart "user@$USER_UID.service" || true
+            # Same trap as the ssh reload above: waiting on a systemd job from
+            # inside a unit that job is ordered after never returns.
+            systemctl restart "user@$USER_UID.service" --no-block || true
             logger "post-ignition-setup: Restarted user@$USER_UID.service for the new group"
         fi
     else

@@ -126,6 +126,38 @@ test_journal_access_for_podman_logs() {
         "systemd-journal" "post-ignition-setup grants journal access to the user"
 }
 
+test_post_ignition_setup_cannot_deadlock_itself() {
+    # This shipped and left every new machine hanging at "Starting machine" with
+    # an empty serial log: the unit was ordered Before=ssh.service while the
+    # script waited on "systemctl reload ssh.service". systemd will not run the
+    # job until the unit finishes, and the unit will not finish until the job
+    # runs. Only the first boot was affected - on later boots the config file
+    # already exists and the reload is skipped - which is exactly what made it
+    # slip through.
+    local unit script
+    unit=$(cat "$ROOT/resources/services/post-ignition-setup.service")
+    script=$(cat "$ROOT/resources/scripts/post-ignition-setup.sh")
+
+    # Directives only - the unit explains this trap in a comment that names it.
+    local ordering
+    ordering=$(printf '%s\n' "$unit" | grep -E '^Before=ssh(d)?\.service' || true)
+    if [ -z "$ordering" ]; then
+        t_pass "post-ignition-setup is not ordered before the service it reloads"
+    else
+        t_fail "post-ignition-setup is not ordered before the service it reloads" "$ordering"
+    fi
+
+    # Anything it asks systemd for has to be fire and forget, whatever the
+    # ordering happens to be.
+    local blocking
+    blocking=$(printf '%s\n' "$script" | grep -E '^\s*systemctl (reload|restart|start|stop) ' | grep -v -- '--no-block' || true)
+    if [ -z "$blocking" ]; then
+        t_pass "every systemctl job it queues is --no-block"
+    else
+        t_fail "every systemctl job it queues is --no-block" "$blocking"
+    fi
+}
+
 test_journal_access_lands_before_the_user_manager() {
     # Regression: the group was granted, but logind had already started the user's
     # systemd manager, which keeps the groups it started with - so podman's API

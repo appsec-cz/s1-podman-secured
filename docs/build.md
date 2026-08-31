@@ -26,6 +26,18 @@ sudo env LIBGUESTFS_BACKEND_SETTINGS=force_tcg ./build.sh
 Copy the result back over the `/Users` share. Do not build in the machine you are
 about to replace with the result without copying the image out first.
 
+**Nothing may stop that machine while the build runs.** The build lives inside
+it, so a `podman machine stop` from anywhere - Podman Desktop counts - takes the
+whole thing with it. That looks like this in the guest's journal, an hour in:
+
+```
+systemd-logind: Powering off...
+session-356.scope: Killing process 140704 (virt-resize) with signal SIGTERM
+```
+
+Run the build detached (`setsid nohup ./run-build.sh &`) so an ssh drop alone is
+survivable, and leave the machine alone until it finishes.
+
 ## Running it
 
 ```bash

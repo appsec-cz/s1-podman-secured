@@ -6,9 +6,17 @@ Before=podman-machine-ready.service
 # The user's systemd manager fixes its supplementary groups when it starts, and
 # logind starts it for the lingering user as soon as sessions are permitted. This
 # must finish first, or the group added below never reaches the rootless podman
-# service that manager spawns.
+# service that manager spawns. Gating user sessions is enough: sshd refuses
+# logins until systemd-user-sessions.service has run, so no session can start a
+# manager before this unit is done.
+#
+# Deliberately NOT Before=ssh.service. The script reloads sshd, and a unit
+# ordered before ssh.service that waits on an ssh.service job deadlocks: systemd
+# will not run the job until this unit finishes, and this unit will not finish
+# until the job runs. That shipped once and left every new machine hanging at
+# "Starting machine" with an empty serial log, because multi-user was never
+# reached and sshd never listened.
 Before=systemd-user-sessions.service
-Before=ssh.service
 ConditionPathExists=/var/lib/ignition-provider-complete
 
 [Service]
