@@ -77,8 +77,13 @@ read the logs the way kind does instead:
 ```bash
 podman logs --follow <container>              # from macOS: must not be silent
 podman machine ssh 'id -nG'                   # contains systemd-journal
-podman machine ssh 'grep Groups /proc/$(pgrep -u core -f "podman system service" | head -1)/status'
+podman machine ssh 'grep Groups /proc/$(systemctl --user show -p MainPID --value podman.service)/status'
 ```
+
+Group 999 is `systemd-journal`; the service having only 1000 is the fault. Do not
+reach for `pgrep -f "podman system service"` here - `-f` matches full command
+lines, so it finds the shell running your own check, reports the groups of a
+fresh login, and tells you everything is fine.
 
 If the last two disagree, this is the first-boot race: `post-ignition-setup` adds
 `core` to `systemd-journal`, but logind had already started `user@501.service` for
