@@ -3,6 +3,12 @@ Description=Post-Ignition Setup for Podman Machine
 After=ignition-provider.service
 Requires=ignition-provider.service
 Before=podman-machine-ready.service
+# The user's systemd manager fixes its supplementary groups when it starts, and
+# logind starts it for the lingering user as soon as sessions are permitted. This
+# must finish first, or the group added below never reaches the rootless podman
+# service that manager spawns.
+Before=systemd-user-sessions.service
+Before=ssh.service
 ConditionPathExists=/var/lib/ignition-provider-complete
 
 [Service]

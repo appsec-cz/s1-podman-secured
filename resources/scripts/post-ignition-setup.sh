@@ -91,6 +91,14 @@ if getent group systemd-journal > /dev/null 2>&1; then
     if ! id -nG "$USERNAME" | tr ' ' '\n' | grep -qx systemd-journal; then
         usermod -aG systemd-journal "$USERNAME"
         logger "post-ignition-setup: Added $USERNAME to systemd-journal (podman logs)"
+        # A process keeps the supplementary groups it started with, so a user
+        # manager logind has already brought up - and the rootless podman API
+        # service inside it - would go on reading nothing from the journal. The
+        # unit ordering should prevent that; restart it if it happened anyway.
+        if systemctl is-active --quiet "user@$USER_UID.service"; then
+            systemctl restart "user@$USER_UID.service" || true
+            logger "post-ignition-setup: Restarted user@$USER_UID.service for the new group"
+        fi
     else
         logger "post-ignition-setup: $USERNAME already in systemd-journal"
     fi

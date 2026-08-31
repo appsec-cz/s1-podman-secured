@@ -64,16 +64,31 @@ kind reports:
 could not find a log line that matches "Reached target .*Multi-User System.*"
 ```
 
-The node container is fine - systemd inside it booted. The log is empty because
-podman's default log driver is journald and the machine user could not read the
-journal, so reading logs back returned silence.
+The node container is fine - systemd inside it booted and reached multi-user in
+well under a second. kind waits for that line by streaming `podman logs --follow`
+from macOS, and that stream came back empty: podman's default log driver is
+journald, and the podman API service in the guest could not read the journal.
+
+Note that a guest shell can read it perfectly well at the same time, because a
+fresh login picks up the current groups. Only the long-lived API service is
+affected, so `podman machine ssh 'podman logs ...'` is not a useful check here -
+read the logs the way kind does instead:
 
 ```bash
-podman machine ssh 'id -nG'     # must contain systemd-journal
-podman machine ssh 'sudo usermod -aG systemd-journal core'   # then restart the machine
+podman logs --follow <container>              # from macOS: must not be silent
+podman machine ssh 'id -nG'                   # contains systemd-journal
+podman machine ssh 'grep Groups /proc/$(pgrep -u core -f "podman system service" | head -1)/status'
 ```
 
-Images built after this fix add the group in `post-ignition-setup`.
+If the last two disagree, this is the first-boot race: `post-ignition-setup` adds
+`core` to `systemd-journal`, but logind had already started `user@501.service` for
+the lingering user, and a process keeps the supplementary groups it started with -
+so the rootless podman service inside that manager runs without journal access for
+the rest of the boot. **Restarting the machine fixes it**, which is why the symptom
+only ever appeared right after `deploy.sh`.
+
+Images built after this fix order `post-ignition-setup` before
+`systemd-user-sessions.service` and restart the user manager if it started anyway.
 
 ## Published ports are unreachable from macOS
 

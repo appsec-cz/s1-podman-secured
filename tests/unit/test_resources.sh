@@ -126,6 +126,19 @@ test_journal_access_for_podman_logs() {
         "systemd-journal" "post-ignition-setup grants journal access to the user"
 }
 
+test_journal_access_lands_before_the_user_manager() {
+    # Regression: the group was granted, but logind had already started the user's
+    # systemd manager, which keeps the groups it started with - so podman's API
+    # service read nothing from the journal until the machine was restarted.
+    local unit
+    unit=$(cat "$ROOT/resources/services/post-ignition-setup.service")
+    assert_contains "$unit" "Before=systemd-user-sessions.service" \
+        "post-ignition-setup runs before user sessions are permitted"
+    assert_contains "$(cat "$ROOT/resources/scripts/post-ignition-setup.sh")" \
+        'systemctl restart "user@$USER_UID.service"' \
+        "post-ignition-setup restarts a user manager that started too early"
+}
+
 test_policy_json_fallback() {
     # Regression: with /etc/containers shadowed, no image could be pulled at all.
     assert_contains "$(cat "$ROOT/resources/scripts/post-ignition-setup.sh")" \

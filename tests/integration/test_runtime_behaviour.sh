@@ -59,6 +59,20 @@ test_logs_are_readable() {
     guest "podman rm -f ${PREFIX}log" >/dev/null 2>&1
 }
 
+test_logs_stream_to_the_host() {
+    # Regression: the journal group was added after logind had already started the
+    # user's systemd manager, so the rootless podman API service inside it ran
+    # without journal access for the rest of that boot. Reading logs from a guest
+    # shell still worked - a fresh login has the group - so only this path showed
+    # it: over the connection "podman logs --follow" returned an empty stream, and
+    # kind died at "Preparing nodes" waiting for "Reached target Multi-User System".
+    local out
+    guest "podman run -d --name ${PREFIX}hlog $TEST_IMG sh -c 'echo HOST_LOG_MARKER; sleep 3'" >/dev/null 2>&1
+    out=$(podman --connection "$MACHINE" logs --follow "${PREFIX}hlog" 2>&1 | tr -d '\r')
+    assert_contains "$out" "HOST_LOG_MARKER" "podman logs --follow streams to macOS (the path kind waits on)"
+    guest "podman rm -f ${PREFIX}hlog" >/dev/null 2>&1
+}
+
 test_published_port_reaches_the_host() {
     # Regression: podman only asks gvproxy to forward ports when it recognises it
     # runs inside a machine. When the marker was hidden, every published port was
