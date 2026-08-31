@@ -1,6 +1,6 @@
 # TODO - Future Improvements
 
-Last reviewed: 2026-08-23
+Last reviewed: 2026-08-31
 
 ## Current Status
 
@@ -18,7 +18,11 @@ The image builds, boots and runs Podman Desktop workloads:
 
 Verified on a deployed machine: btrfs storage driver rootless and rootful, disk
 grown to full size, published ports reachable from macOS, `podman logs` working,
-a kind cluster created and driven from macOS.
+a kind cluster created and driven from macOS, and one created through Podman
+Desktop's own kind extension.
+
+The machine also reports on itself at the end of every boot; see
+[docs/troubleshooting.md](docs/troubleshooting.md#start-here).
 
 ## Open
 
@@ -111,29 +115,22 @@ Copy host certificates into the VM for private registry access:
 - source: host certificate store via virtiofs
 - destination: `/etc/containers/certs.d/`
 
-### 6. Diagnostic logging
-
-**File**: `resources/scripts/podman-machine-ready.sh`
-
-Log systemd service states, network interface status and vsock connection
-attempts during boot.
-
-### 7. Health check endpoint
+### 6. Health check endpoint
 
 A vsock endpoint reporting systemd service status and container runtime status,
 to make stuck machines diagnosable from the host.
 
-### 8. Volume mount validation at build time
+### 7. Volume mount validation at build time
 
 Warn about forbidden mount paths: `/bin`, `/boot`, `/dev`, `/etc`, `/home`,
 `/proc`, `/root`, `/run`, `/sbin`, `/sys`, `/tmp`, `/usr`, `/var`.
 
-### 9. Ansible playbook support
+### 8. Ansible playbook support
 
 Support `--playbook` from `podman machine init`: install Ansible in the base
 image and run the playbook after Ignition completes.
 
-### 10. Machine inspection endpoint
+### 9. Machine inspection endpoint
 
 Report machine configuration, resource usage and installed packages for
 `podman machine inspect` compatibility.
@@ -143,8 +140,6 @@ Report machine configuration, resource usage and installed packages for
 - SentinelOne's scanner logs 63 `scanner error 1` entries, 19 of them on files in
   container storage and the rest elsewhere - so not btrfs specific, but not
   explained either
-- The kind cluster was verified from the CLI; Podman Desktop's own kind extension
-  has not been retested since the fixes
 - Podman 6 picks the vfkit REST port without checking availability. It collided
   with another local service once, and every `podman machine` command then failed
   with `unknown machine state:`. Workaround: edit `Endpoint` in
@@ -167,16 +162,31 @@ Report machine configuration, resource usage and installed packages for
   `policy.json` (no image could be pulled at all) and `podman-machine` (podman
   stopped recognising it runs in a machine, so no published port was ever
   forwarded to the host). The Ignition provider now skips that unit.
-- **`podman logs` returned nothing.** The user was not in `systemd-journal`, so
-  reading back journald-driven container logs produced silence, and anything
-  waiting on a log line hung - kind failed with "could not find a log line that
-  matches Reached target Multi-User System".
+- **`podman logs` returned nothing.** The machine user was not in
+  `systemd-journal`, so reading back journald-driven container logs produced
+  silence, and anything waiting on a log line hung - kind failed with "could not
+  find a log line that matches Reached target Multi-User System". The group was
+  in fact being granted; the fault was ordering. logind had already started
+  `user@501.service` for the lingering user, and a process keeps the supplementary
+  groups it started with, so the rootless podman service inside that manager
+  stayed blind for the rest of the boot - while a fresh ssh login could read the
+  journal perfectly well, which is what made it look fixed. `post-ignition-setup`
+  now runs before user sessions are permitted, and restarts the manager if one
+  got there first.
 - **gvforwarder.** Previously listed as a possible fix for port forwarding. It is
   not needed: the guest-side agent that calls gvproxy's
   `/services/forwarder/expose` is podman itself, and it only does so when it
   recognises the machine marker. Fixing the marker fixed forwarding.
 - **Timezone support.** Handled - Ignition sets `/etc/localtime` and the provider
   applies it.
+- **Nothing to look at when a machine came up wrong.** Every failure above is
+  silent: the machine boots, podman answers, and only some later operation
+  behaves strangely. `podman-machine-diagnostics` now runs at the end of every
+  boot - after the ready signal, so `podman machine start` does not pay for it -
+  and asks about each of them by name, marking anything it cannot vouch for as
+  `FAULT` with the consequence spelled out. It can also be run by hand at any
+  time, and `podman-machine-ready` now records how long each boot phase took and
+  whether the vsock ready signal actually went out.
 
 ## Not Planned
 

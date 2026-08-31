@@ -175,4 +175,57 @@ test_rootless_prerequisites() {
     done
 }
 
+test_diagnostics_find_nothing_wrong() {
+    # The diagnostics script only asks about failures this image has actually
+    # shipped, so a clean run is a real statement about the machine - and running
+    # the repository's copy means this holds even on a guest built from an older
+    # image, which is exactly when it matters most.
+    local repo_script report faults
+    repo_script="$HERE/../../resources/scripts/machine-diagnostics.sh"
+    if [ ! -r "$repo_script" ]; then
+        t_fail "the diagnostics script is in the repository" "not at $repo_script"
+        return
+    fi
+
+    guest 'cat > /tmp/machine-diagnostics.sh && chmod +x /tmp/machine-diagnostics.sh' \
+        < "$repo_script" >/dev/null 2>&1
+    report=$(guest 'sudo /tmp/machine-diagnostics.sh' 2>&1 | tr -d '\r')
+    guest 'rm -f /tmp/machine-diagnostics.sh' >/dev/null 2>&1
+
+    if [ -z "$report" ]; then
+        t_fail "the diagnostics run in the guest" "no output at all"
+        return
+    fi
+    t_pass "the diagnostics run in the guest"
+
+    faults=$(printf '%s\n' "$report" | grep -c '^  FAULT')
+    if [ "${faults:-0}" -eq 0 ]; then
+        t_pass "the diagnostics report no faults"
+    else
+        t_fail "the diagnostics report no faults" \
+            "$(printf '%s\n' "$report" | grep '^  FAULT')"
+    fi
+
+    # A checker that can only ever say "ok" proves nothing, so make it prove it
+    # still notices: nobody is not in systemd-journal.
+    local negative
+    guest 'cat > /tmp/machine-diagnostics.sh && chmod +x /tmp/machine-diagnostics.sh' \
+        < "$repo_script" >/dev/null 2>&1
+    negative=$(guest 'sudo MACHINE_USER=nobody /tmp/machine-diagnostics.sh' 2>&1 | tr -d '\r')
+    guest 'rm -f /tmp/machine-diagnostics.sh' >/dev/null 2>&1
+    assert_contains "$negative" "FAULT" "the diagnostics still detect a fault when there is one"
+}
+
+test_diagnostics_are_installed() {
+    local installed
+    installed=$(guest 'test -x /usr/local/bin/podman-machine-diagnostics && echo yes || echo no' \
+        2>/dev/null | tr -d '\r')
+    if [ "$installed" = "yes" ]; then
+        t_pass "podman-machine-diagnostics is installed in the guest"
+    else
+        t_skip "podman-machine-diagnostics is installed in the guest" \
+            "this guest predates it - rebuild the image"
+    fi
+}
+
 run_tests

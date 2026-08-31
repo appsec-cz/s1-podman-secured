@@ -3,6 +3,23 @@
 Every entry here is a failure that actually happened, with the symptom first -
 because in each case the symptom pointed nowhere near the cause.
 
+## Start here
+
+The machine checks itself at the end of every boot and leaves the answer behind.
+It only asks about the failures on this page, so a clean report is worth
+something:
+
+```bash
+podman machine ssh <machine> 'sudo podman-machine-diagnostics'   # now
+podman machine ssh <machine> 'cat /var/log/podman-machine-diagnostics.log'  # at boot
+podman machine ssh <machine> 'journalctl -t podman-machine-diagnostics -b'  # earlier boots
+```
+
+Anything it cannot vouch for is marked `FAULT` and names the consequence, so the
+report usually points straight at the entry below that explains it. A guest built
+before this existed has no such command; the same checks run from the repository
+with `./tests/run.sh integration`.
+
 ## `podman machine start` hangs forever, then the machine will not even stop
 
 `podman machine stop` times out too, and the VM sits at 0% CPU. The serial log

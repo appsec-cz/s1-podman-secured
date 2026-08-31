@@ -139,6 +139,38 @@ test_journal_access_lands_before_the_user_manager() {
         "post-ignition-setup restarts a user manager that started too early"
 }
 
+test_diagnostics_cover_the_failures_that_shipped() {
+    # A generic "dump everything" buries the specific silent failures this image
+    # has had, so each of them is asked about by name.
+    local diag
+    diag=$(cat "$ROOT/resources/scripts/machine-diagnostics.sh")
+    assert_contains "$diag" "systemd-journal" "diagnostics check journal access for rootless podman"
+    assert_contains "$diag" "user@\${uid}.service" "and check the manager podman inherits its groups from"
+    assert_contains "$diag" "findmnt -no SOURCE,FSTYPE /etc/containers" "diagnostics check for a shadowed /etc/containers"
+    assert_contains "$diag" "podman-machine" "diagnostics check the machine marker that drives port forwarding"
+    assert_contains "$diag" "GraphDriverName" "diagnostics check the effective storage driver"
+    assert_contains "$diag" "binfmt_misc" "diagnostics check which x86_64 handler is registered"
+    assert_contains "$diag" "podman-machine-ready-signal" "diagnostics report whether the host was told we are ready"
+}
+
+test_diagnostics_are_off_the_critical_path() {
+    # podman machine start blocks on the ready signal, so the collection must
+    # happen after it or every start pays for it.
+    local ready before_signal
+    ready=$(cat "$ROOT/resources/scripts/podman-machine-ready.sh")
+    assert_contains "$ready" "podman-machine-diagnostics" "the ready reporter runs the diagnostics"
+    before_signal=$(printf '%s' "$ready" | sed -n '1,/^send_ready$/p')
+    assert_not_contains "$before_signal" "/usr/local/bin/podman-machine-diagnostics" \
+        "but only after the ready signal has gone out"
+    assert_contains "$ready" "/run/podman-machine-ready-signal" \
+        "and the ready signal outcome is recorded for them"
+}
+
+test_diagnostics_are_installed_by_install_sh() {
+    assert_contains "$(cat "$ROOT/resources/install.sh")" \
+        "machine-diagnostics.sh" "install.sh installs the diagnostics script"
+}
+
 test_policy_json_fallback() {
     # Regression: with /etc/containers shadowed, no image could be pulled at all.
     assert_contains "$(cat "$ROOT/resources/scripts/post-ignition-setup.sh")" \

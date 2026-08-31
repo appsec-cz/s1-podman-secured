@@ -203,6 +203,9 @@ echo "=== Installing scripts ==="
 install -m 755 "$RESOURCES/scripts/ignition-provider.py" /usr/local/sbin/ignition-provider.py
 install -m 755 "$RESOURCES/scripts/post-ignition-setup.sh" /usr/local/bin/post-ignition-setup.sh
 install -m 755 "$RESOURCES/scripts/podman-machine-ready.sh" /usr/local/bin/podman-machine-ready.sh
+# Named without the .sh so it reads as a command when run by hand, which is most
+# of what it is for.
+install -m 755 "$RESOURCES/scripts/machine-diagnostics.sh" /usr/local/bin/podman-machine-diagnostics
 install -m 755 "$RESOURCES/scripts/rosetta-activate.sh" /usr/local/bin/rosetta-activate.sh
 echo "✓ Scripts installed"
 
