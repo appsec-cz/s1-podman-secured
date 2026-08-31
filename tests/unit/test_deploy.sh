@@ -43,17 +43,41 @@ test_kind_nodes_are_left_behind() {
         "kind nodes are excluded from what gets exported"
 }
 
-test_containers_are_generated_one_per_pod() {
-    # "podman kube generate a b" would put a and b in one pod and hand them a
-    # shared network namespace they never had.
-    assert_contains "$DEPLOY" 'podman kube generate --podman-only "$c" > "$DIR/containers/$c.yaml"' \
-        "each container gets its own definition"
+test_pods_are_taken_whole() {
+    # podman refuses to generate a container that belongs to a pod - "use
+    # generate on the pod itself" - and never generates an infra container. A
+    # backup that only walked containers silently dropped every composed
+    # application it met, which is exactly what happened.
+    assert_contains "$DEPLOY" 'podman kube generate --podman-only "$pod" > "$DIR/containers/pod-$pod.yaml"' \
+        "pods are generated as pods"
+    assert_contains "$DEPLOY" 'podman kube generate --podman-only "$c" > "$DIR/containers/ctr-$c.yaml"' \
+        "and only containers outside any pod individually"
+    assert_contains "$DEPLOY" '{{.Pod}}\t{{.Names}}' \
+        "the individual list is built from containers with no pod"
+    assert_contains "$DEPLOY" '{{.PodName}}\t{{.IsInfra}}\t{{.Names}}' \
+        "pod members are recorded, so infra is never promised back"
+}
+
+test_containers_are_generated_one_per_file() {
+    # Generating several into one file would put unrelated containers in a pod
+    # and hand them a network namespace they never shared.
     assert_contains "$DEPLOY" "--podman-only" \
         "the definition keeps what plain Kubernetes YAML cannot express"
     assert_contains "$DEPLOY" "podman kube play --no-pod-prefix" \
         "the restored container keeps its own name"
     assert_contains "$DEPLOY" 'podman rename "${c}-pod-${c}" "$c"' \
         "and a podman without that flag is still handled"
+}
+
+test_the_written_down_state_covers_what_was_dropped() {
+    # The message points people at containers.json for whatever could not be
+    # expressed. It was written from the already-filtered list, so it was empty
+    # for exactly those containers - an escape hatch that was not one.
+    local before_filter
+    before_filter=$(printf '%s' "$DEPLOY" | sed -n '/carried.txt/,/pods.json/p')
+    assert_contains "$before_filter" "podman container inspect" \
+        "every carried container is inspected before anything is filtered out"
+    assert_contains "$DEPLOY" "podman pod inspect" "and the pods too"
 }
 
 test_backup_is_only_discarded_after_verification() {
@@ -81,6 +105,18 @@ test_backup_leaves_containers_as_it_found_them() {
     # --backup-only replaces nothing, so it must not leave everything stopped.
     assert_contains "$DEPLOY" 'xargs -r podman start < "$DIR/running.txt"' \
         "containers stopped for the export are started again"
+    # Pod status is deliberately not used: podman calls a pod with some
+    # containers down "Degraded", and reading that as stopped took the running
+    # ones with it on restore. Starting a container brings its pod up anyway.
+    assert_not_contains "$DEPLOY" "running-pods" \
+        "pod run state is never second-guessed from the pod status"
+
+    # Taken after the stop this list is always empty, the restore starts nothing,
+    # and a backup silently leaves the machine down. That shipped once.
+    local before_stop
+    before_stop=$(printf '%s' "$DEPLOY" | sed -n "/^BACKUP_GUEST_SCRIPT=/,/podman pod stop/p")
+    assert_contains "$before_stop" 'podman ps --format "{{.Names}}" | sort > "$DIR/running-all.txt"' \
+        "the running list is captured before anything is stopped"
 }
 
 run_tests

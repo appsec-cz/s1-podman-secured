@@ -42,6 +42,9 @@ test_01_machine_with_data() {
     fi
     t_pass "throwaway machine created"
 
+    # A pod with one member up and one down is the shape that broke: podman
+    # refuses to generate a container that belongs to a pod, and calls such a pod
+    # "Degraded" rather than running.
     machine_run_script <<EOS >/dev/null 2>&1
 podman pull $MIG_IMG
 podman volume create migvol --label purpose=migration
@@ -50,12 +53,19 @@ podman run -d --name migrunning -p 18099:80 -v migvol:/data --restart=always \
 sleep 2
 podman run -d --name migstopped $MIG_IMG sleep 3600
 podman stop migstopped
+podman pod create --name migpod -p 18098:80
+podman run -d --pod migpod --name migpodup $MIG_IMG sleep 3600
+podman run -d --pod migpod --name migpoddown $MIG_IMG sleep 3600
+sleep 2
+podman stop migpoddown
 EOS
 
     local names
     names=$(machine_ssh "podman ps -a --format '{{.Names}}'" 2>/dev/null | tr -d '\r' | sort | tr '\n' ' ')
     assert_contains "$names" "migrunning" "a running container exists to be preserved"
     assert_contains "$names" "migstopped" "a stopped container exists to be preserved"
+    assert_contains "$names" "migpodup" "a pod member is up"
+    assert_contains "$names" "migpoddown" "and another is down, so the pod is Degraded"
 }
 
 # deploy.sh talks to a person, so its output is coloured; the path has to be dug
@@ -76,12 +86,25 @@ test_02_backup_writes_a_usable_set() {
 
     assert_file_exists "$BACKUP_PATH/images.tar" "the image archive was written"
     assert_file_exists "$BACKUP_PATH/volumes/migvol.tar" "the volume was exported"
-    assert_file_exists "$BACKUP_PATH/containers/migrunning.yaml" "the container definition was generated"
+    assert_file_exists "$BACKUP_PATH/containers/ctr-migrunning.yaml" "the container definition was generated"
     assert_file_exists "$BACKUP_PATH/manifest.json" "the manifest was written"
 
-    # One pod per container: a shared pod would give them a network namespace
-    # they never had.
-    assert_file_exists "$BACKUP_PATH/containers/migstopped.yaml" "each container got its own definition"
+    # One file each: generating several together would put unrelated containers
+    # in a pod and hand them a network namespace they never shared.
+    assert_file_exists "$BACKUP_PATH/containers/ctr-migstopped.yaml" "each container got its own definition"
+
+    # The whole point of the pod case - a per-container generate fails here.
+    assert_file_exists "$BACKUP_PATH/containers/pod-migpod.yaml" "the pod was generated as a pod"
+    local ungenerated
+    ungenerated=$(cat "$BACKUP_PATH/ungenerated.txt" "$BACKUP_PATH/ungenerated-pods.txt" 2>/dev/null)
+    assert_eq "" "$ungenerated" "nothing was left behind as ungeneratable"
+
+    # The escape hatch has to hold what was dropped, not what survived.
+    if [ -s "$BACKUP_PATH/containers.json" ]; then
+        t_pass "the recorded container state is not empty"
+    else
+        t_fail "the recorded container state is not empty" "containers.json is empty"
+    fi
 }
 
 test_03_data_survives_a_replacement() {
@@ -125,6 +148,16 @@ test_03_data_survives_a_replacement() {
     local ports
     ports=$(machine_ssh "podman port migrunning" 2>/dev/null | tr -d '\r')
     assert_contains "$ports" "18099" "the published port came back"
+
+    # A pod whose members were half up reads as "Degraded"; treating that as
+    # stopped took the running member down with it on restore.
+    assert_contains "$names" "migpodup" "the pod member came back"
+    assert_contains "$running" "migpodup" "the member that was up is up again"
+    assert_not_contains "$running" "migpoddown" "the member that was down stayed down"
+
+    local pods
+    pods=$(machine_ssh "podman pod ls --format '{{.Name}}'" 2>/dev/null | tr -d '\r' | tr '\n' ' ')
+    assert_contains "$pods" "migpod" "the pod itself came back under its own name"
 }
 
 test_04_verified_backup_is_discarded() {

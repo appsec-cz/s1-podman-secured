@@ -52,8 +52,8 @@ Whether the agent actually uses it cannot be answered from here.
 
 Next steps, in order:
 
-1. register the agent with a site token (it currently reports `Connectivity Off`,
-   `Customer id undefined`, so visibility modules are probably not even running)
+1. register the agent with a site token, and give it a couple of minutes -
+   `Connectivity` reads `Off` for a while after registration before it turns `On`
 2. ask SentinelOne support whether their Linux agent discovers Podman through the
    Docker compatible socket, or through containerd
 3. run a container and confirm in the console whether the event carries container

@@ -217,10 +217,41 @@ mkdir -p "$DIR/volumes" "$DIR/containers"
 # cluster - kind has to build those again itself.
 podman ps -a --format "{{.Names}}" | sort > "$DIR/all.txt"
 podman ps -a --filter label=io.x-k8s.kind.cluster --format "{{.Names}}" | sort > "$DIR/skipped.txt"
-comm -23 "$DIR/all.txt" "$DIR/skipped.txt" > "$DIR/containers.txt"
-podman ps --format "{{.Names}}" | sort > "$DIR/running.txt"
+comm -23 "$DIR/all.txt" "$DIR/skipped.txt" > "$DIR/carried.txt"
+
+# Written before anything is filtered out, so a container this cannot express
+# still has its full state recorded somewhere. Pointing someone at this file and
+# leaving it empty is worse than not offering it.
+if [ -s "$DIR/carried.txt" ]; then
+    xargs -r podman container inspect < "$DIR/carried.txt" > "$DIR/containers.json" 2>/dev/null || true
+fi
+podman pod ls --format "{{.Name}}" | sort > "$DIR/pods.txt"
+if [ -s "$DIR/pods.txt" ]; then
+    xargs -r podman pod inspect < "$DIR/pods.txt" > "$DIR/pods.json" 2>/dev/null || true
+fi
+
+# A container that belongs to a pod cannot be generated on its own - podman
+# refuses with "use generate on the pod itself" - and an infra container never
+# can. So pods are taken whole and only containers outside any pod individually.
+# Generating several containers into one file is still avoided: that would put
+# unrelated containers in a pod and hand them a shared network namespace.
+podman ps -a --format "{{.Pod}}\t{{.Names}}" | awk -F"\t" "\$1 == \"\" {print \$2}" | sort > "$DIR/standalone.txt"
+comm -23 "$DIR/standalone.txt" "$DIR/skipped.txt" > "$DIR/containers.txt"
+podman ps -a --format "{{.PodName}}\t{{.IsInfra}}\t{{.Names}}" \
+    | awk -F"\t" "\$1 != \"\" && \$2 == \"false\" {print \$1 \"\t\" \$3}" | sort > "$DIR/members.txt"
+
+# Recorded before anything is stopped below - taken afterwards this is always
+# empty, and the restore then leaves everything down.
+#
+# Only containers, never pod status: podman calls a pod with some of its
+# containers down "Degraded", and reading that as stopped takes the running ones
+# with it. Starting a container in a stopped pod brings the pod up anyway.
+podman ps --format "{{.Names}}" | sort > "$DIR/running-all.txt"
 
 # A container still writing would hand us a torn volume.
+if [ -s "$DIR/pods.txt" ]; then
+    xargs -r podman pod stop -t 10 < "$DIR/pods.txt" >/dev/null 2>&1 || true
+fi
 if [ -s "$DIR/containers.txt" ]; then
     xargs -r podman stop -t 10 < "$DIR/containers.txt" >/dev/null 2>&1 || true
 fi
@@ -238,41 +269,49 @@ if [ -s "$DIR/volumes.txt" ]; then
     done < "$DIR/volumes.txt"
 fi
 
-# One pod per container on purpose: "podman kube generate a b" puts a and b in
-# the same pod and hands them a shared network namespace they never had.
-#
-# A container can fail here for a reason that is no fault of the machine: the
-# list is a snapshot, and a --rm container that exits between the listing and
-# the export is simply gone. That must not cost the images and volumes, so such
-# a container is recorded and dropped rather than treated as a failure.
+# Anything that cannot be generated is recorded and dropped rather than treated
+# as a failure: the list is a snapshot, and a --rm container that exits between
+# the listing and the export is simply gone. That must not cost the images.
 : > "$DIR/ungenerated.txt"
-if [ -s "$DIR/containers.txt" ]; then
-    while read -r c; do
-        if ! podman kube generate --podman-only "$c" > "$DIR/containers/$c.yaml" 2>/dev/null; then
-            rm -f "$DIR/containers/$c.yaml"
-            echo "$c" >> "$DIR/ungenerated.txt"
-        fi
-    done < "$DIR/containers.txt"
-
-    # Whatever could not be captured must not be promised to the restore, or
-    # verification fails over something that was never in the backup.
-    if [ -s "$DIR/ungenerated.txt" ]; then
-        sort -o "$DIR/ungenerated.txt" "$DIR/ungenerated.txt"
-        comm -23 "$DIR/containers.txt" "$DIR/ungenerated.txt" > "$DIR/containers.keep"
-        mv "$DIR/containers.keep" "$DIR/containers.txt"
+: > "$DIR/ungenerated-pods.txt"
+while read -r pod; do
+    [ -n "$pod" ] || continue
+    if ! podman kube generate --podman-only "$pod" > "$DIR/containers/pod-$pod.yaml" 2>/dev/null; then
+        rm -f "$DIR/containers/pod-$pod.yaml"
+        echo "$pod" >> "$DIR/ungenerated-pods.txt"
     fi
-
-    comm -12 "$DIR/running.txt" "$DIR/containers.txt" > "$DIR/running.keep"
-    mv "$DIR/running.keep" "$DIR/running.txt"
-
-    xargs -r podman container inspect < "$DIR/containers.txt" > "$DIR/containers.json" 2>/dev/null || true
-
-    # The stop above was ours, and taking a backup is not a reason to leave
-    # someone with their containers down - least of all with --backup-only,
-    # where no machine is being replaced at all.
-    if [ -s "$DIR/running.txt" ]; then
-        xargs -r podman start < "$DIR/running.txt" >/dev/null 2>&1 || true
+done < "$DIR/pods.txt"
+while read -r c; do
+    [ -n "$c" ] || continue
+    if ! podman kube generate --podman-only "$c" > "$DIR/containers/ctr-$c.yaml" 2>/dev/null; then
+        rm -f "$DIR/containers/ctr-$c.yaml"
+        echo "$c" >> "$DIR/ungenerated.txt"
     fi
+done < "$DIR/containers.txt"
+
+# What the restore may promise: standalone containers that generated, plus the
+# members of pods that generated. Infra containers are left out - a rebuilt pod
+# gets a new one under a different name.
+sort -o "$DIR/ungenerated.txt" "$DIR/ungenerated.txt"
+sort -o "$DIR/ungenerated-pods.txt" "$DIR/ungenerated-pods.txt"
+comm -23 "$DIR/containers.txt" "$DIR/ungenerated.txt" > "$DIR/containers.keep"
+mv "$DIR/containers.keep" "$DIR/containers.txt"
+comm -23 "$DIR/pods.txt" "$DIR/ungenerated-pods.txt" > "$DIR/pods.keep"
+mv "$DIR/pods.keep" "$DIR/pods.txt"
+
+cp "$DIR/containers.txt" "$DIR/expected.txt"
+while read -r pod name; do
+    grep -qx "$pod" "$DIR/pods.txt" 2>/dev/null && echo "$name" >> "$DIR/expected.txt"
+done < "$DIR/members.txt"
+sort -u -o "$DIR/expected.txt" "$DIR/expected.txt"
+
+comm -12 "$DIR/running-all.txt" "$DIR/expected.txt" > "$DIR/running.txt"
+
+# The stop above was ours, and taking a backup is not a reason to leave someone
+# with their containers down - least of all with --backup-only, where no machine
+# is being replaced at all.
+if [ -s "$DIR/running.txt" ]; then
+    xargs -r podman start < "$DIR/running.txt" >/dev/null 2>&1 || true
 fi
 
 podman --version > "$DIR/guest-podman-version.txt" 2>/dev/null || true
@@ -358,10 +397,11 @@ manifest = {
     "guest_podman": guest_version(),
     "images": read("images.txt"),
     "volumes": read("volumes.txt"),
-    "containers": read("containers.txt"),
+    "containers": read("expected.txt"),
+    "pods": read("pods.txt"),
     "running": read("running.txt"),
     "skipped": read("skipped.txt"),
-    "ungenerated": read("ungenerated.txt"),
+    "ungenerated": read("ungenerated.txt") + ["pod " + p for p in read("ungenerated-pods.txt")],
     "sentinelone_site_key": site_key,
 }
 with open(os.path.join(d, "manifest.json"), "w") as fh:
@@ -371,22 +411,24 @@ PY
 }
 
 print_backup_contents() {
-    local images volumes containers skipped size
+    local images volumes containers pods skipped size
     images=$(wc -l < "$BACKUP_DIR/images.txt" 2>/dev/null | tr -d ' ')
     volumes=$(wc -l < "$BACKUP_DIR/volumes.txt" 2>/dev/null | tr -d ' ')
-    containers=$(wc -l < "$BACKUP_DIR/containers.txt" 2>/dev/null | tr -d ' ')
+    containers=$(wc -l < "$BACKUP_DIR/expected.txt" 2>/dev/null | tr -d ' ')
+    pods=$(wc -l < "$BACKUP_DIR/pods.txt" 2>/dev/null | tr -d ' ')
     skipped=$(wc -l < "$BACKUP_DIR/skipped.txt" 2>/dev/null | tr -d ' ')
     size=$(du -sh "$BACKUP_DIR" 2>/dev/null | cut -f1)
 
-    echo -e "${GREEN}  Backed up: ${images:-0} images, ${volumes:-0} volumes, ${containers:-0} containers (${size:-?})${NC}"
+    echo -e "${GREEN}  Backed up: ${images:-0} images, ${volumes:-0} volumes, ${containers:-0} containers in ${pods:-0} pods (${size:-?})${NC}"
     if [ "${skipped:-0}" -gt 0 ]; then
         echo -e "${YELLOW}  Skipped ${skipped} kind node(s) - recreate those clusters with kind${NC}"
         sed 's/^/    - /' "$BACKUP_DIR/skipped.txt"
     fi
-    if [ -s "$BACKUP_DIR/ungenerated.txt" ]; then
+    if [ -s "$BACKUP_DIR/ungenerated.txt" ] || [ -s "$BACKUP_DIR/ungenerated-pods.txt" ]; then
         echo -e "${YELLOW}  No definition could be generated for:${NC}"
-        sed 's/^/    - /' "$BACKUP_DIR/ungenerated.txt"
-        echo "    (their full state is still in containers.json)"
+        sed 's/^/    - /' "$BACKUP_DIR/ungenerated.txt" 2>/dev/null
+        sed 's/^/    - pod /' "$BACKUP_DIR/ungenerated-pods.txt" 2>/dev/null
+        echo "    (their full state is in containers.json and pods.json)"
     fi
 }
 
@@ -416,18 +458,18 @@ for f in "$DIR"/containers/*.yaml; do
         echo "RESTORE_FAIL play $(basename "$f" .yaml)"
 done
 
-if [ -s "$DIR/containers.txt" ]; then
+if [ -s "$DIR/expected.txt" ]; then
     # Fallback for a podman without --no-pod-prefix, which names it <name>-pod-<name>.
     while read -r c; do
         if podman container exists "${c}-pod-${c}" && ! podman container exists "$c"; then
             podman rename "${c}-pod-${c}" "$c" >/dev/null 2>&1 || echo "RESTORE_FAIL rename $c"
         fi
-    done < "$DIR/containers.txt"
+    done < "$DIR/expected.txt"
 
     # kube play starts everything it creates; stop again what was not running.
     while read -r c; do
         grep -qx "$c" "$DIR/running.txt" 2>/dev/null || podman stop -t 5 "$c" >/dev/null 2>&1 || true
-    done < "$DIR/containers.txt"
+    done < "$DIR/expected.txt"
 fi
 '
 
@@ -440,6 +482,7 @@ podman images --format "{{.Repository}}:{{.Tag}}" | sort -u > "$now/images"
 podman volume ls --format "{{.Name}}" | sort > "$now/volumes"
 podman ps -a --format "{{.Names}}" | sort > "$now/containers"
 podman ps --format "{{.Names}}" | sort > "$now/running"
+podman pod ls --format "{{.Name}}" | sort > "$now/pods"
 
 while read -r i; do
     grep -qx "$i" "$now/images" || { echo "MISSING image $i"; fail=1; }
@@ -449,12 +492,16 @@ while read -r v; do
     grep -qx "$v" "$now/volumes" || { echo "MISSING volume $v"; fail=1; }
 done < "$DIR/volumes.txt"
 
+# expected.txt is standalone containers plus the members of pods that were
+# captured - never infra, which comes back under a new name.
 while read -r c; do
     grep -qx "$c" "$now/containers" || { echo "MISSING container $c"; fail=1; }
-done < "$DIR/containers.txt"
+done < "$DIR/expected.txt"
 
-# running.txt was narrowed to what the backup actually carries, so everything
-# left in it has to be running again.
+while read -r pod; do
+    grep -qx "$pod" "$now/pods" || { echo "MISSING pod $pod"; fail=1; }
+done < "$DIR/pods.txt"
+
 while read -r c; do
     grep -qx "$c" "$now/running" || { echo "MISSING running $c"; fail=1; }
 done < "$DIR/running.txt"

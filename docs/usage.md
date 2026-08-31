@@ -179,12 +179,14 @@ What travels:
 - **Images** through `podman save`, all of them that carry a name.
 - **Volumes** through `podman volume export`, recreated first with the driver,
   labels and options they had.
-- **Containers** through `podman kube generate --podman-only`, which keeps the
-  settings plain Kubernetes YAML cannot express. One file per container, because
-  generating them together would put them in one pod and hand them a shared
-  network namespace they never had.
-- **Running state** - what was running is started again, what was stopped stays
-  stopped.
+- **Pods, whole**, through `podman kube generate --podman-only`. A container that
+  belongs to a pod cannot be generated on its own - podman refuses with "use
+  generate on the pod itself" - so anything composed is taken as a pod, and only
+  containers outside any pod are taken individually. One file each, because
+  generating several together would put unrelated containers in a pod and hand
+  them a network namespace they never shared.
+- **Running state**, per container - what was running is started again, what was
+  stopped stays stopped, including a pod with only some of its containers up.
 
 What does not:
 
@@ -192,8 +194,9 @@ What does not:
   its definition does not give back a working cluster. They are listed and
   skipped; rebuild those clusters with kind.
 - **Anything `podman kube generate` cannot express.** Such containers are named
-  in the output and their full state is kept in `containers.json` inside the
-  backup, to rebuild by hand.
+  in the output; `containers.json` and `pods.json` in the backup hold the full
+  state of everything carried, including whatever could not be expressed, to
+  rebuild by hand.
 - **Standalone-ness.** Podman always generates a pod, so a restored container
   comes back inside a pod of its own and `podman ps -a` gains an infra container
   next to it. `--no-pod-prefix` keeps the container under its original name, and
