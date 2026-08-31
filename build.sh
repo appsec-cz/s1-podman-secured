@@ -29,11 +29,16 @@ DEBUG_BUILD="${DEBUG_BUILD:-0}"
 # /tmp/debs/package-list.txt so install.sh can repair and verify against it.
 # Pure podman - no Docker Engine. docker.io also conflicts with podman-docker,
 # which is why podman-docker never installed while docker.io was on this list.
+#
+# ansible-core rather than ansible: it is what provides ansible-playbook, which
+# is all "podman machine init --playbook" runs, and it costs 37 packages instead
+# of several hundred. Baked in rather than installed on demand at first boot, so
+# a playbook still works on a machine with no route to a Debian mirror.
 PACKAGES="podman conmon containernetworking-plugins netavark aardvark-dns \
 slirp4netns passt uidmap crun openssh-server socat \
 dbus-user-session systemd-container iptables nftables iproute2 \
 qemu-user qemu-user-binfmt podman-docker cifs-utils nfs-common \
-procps chrony btrfs-progs"
+procps chrony btrfs-progs ansible-core"
 
 # Directories
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

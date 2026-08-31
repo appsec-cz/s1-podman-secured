@@ -271,4 +271,35 @@ test_health_report_reaches_the_host() {
     guest 'rm -f /tmp/machine-health.sh' >/dev/null 2>&1
 }
 
+test_ansible_can_run_a_playbook() {
+    # "podman machine init --playbook" runs ansible-playbook and nothing else, so
+    # the image has to carry it. Without it the unit podman writes fails at the
+    # first line with "Command ansible-playbook is not executable".
+    local version
+    version=$(guest 'ansible-playbook --version 2>/dev/null | head -1' 2>/dev/null | tr -d '\r')
+    if [ -z "$version" ]; then
+        t_skip "the guest can run an Ansible playbook" \
+            "this guest predates ansible-core - rebuild the image"
+        return
+    fi
+    t_pass "ansible-playbook is installed ($version)"
+
+    local out
+    out=$(guest_script <<'EOS' 2>&1 | tr -d '\r'
+cat > /tmp/probe-playbook.yaml <<'YAML'
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: prove the playbook ran
+      ansible.builtin.debug:
+        msg: PLAYBOOK_RAN_OK
+YAML
+ansible-playbook /tmp/probe-playbook.yaml 2>&1 | tail -12
+rm -f /tmp/probe-playbook.yaml
+EOS
+)
+    assert_contains "$out" "PLAYBOOK_RAN_OK" "a playbook actually runs in the guest"
+}
+
 run_tests

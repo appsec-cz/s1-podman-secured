@@ -203,6 +203,14 @@ test_health_is_installed_and_scheduled() {
         "and enables the timer that keeps it reporting"
 }
 
+test_ansible_is_in_the_image() {
+    # systemd-analyze on the generated unit says it plainly when it is not:
+    # "Command ansible-playbook is not executable". Installing it on demand at
+    # first boot would make a playbook depend on reaching a Debian mirror.
+    assert_contains "$(cat "$ROOT/build.sh")" "ansible-core" \
+        "the image carries ansible-core for --playbook"
+}
+
 test_policy_json_fallback() {
     # Regression: with /etc/containers shadowed, no image could be pulled at all.
     assert_contains "$(cat "$ROOT/resources/scripts/post-ignition-setup.sh")" \

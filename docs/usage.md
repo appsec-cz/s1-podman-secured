@@ -209,6 +209,31 @@ The store is exported straight onto the Mac: `$HOME` is under `/Users`, which th
 machine mounts at the same path, so gigabytes never travel through the ssh
 connection. Expect to need about as much free space as the store occupies.
 
+## Running a playbook on a new machine
+
+`podman machine init --playbook` is supported: podman writes the file to
+`/home/core/playbook.yaml` inside the guest and a `playbook.service` runs it once
+the machine reports ready.
+
+```bash
+podman machine init --playbook ./setup.yaml --image podman-debian.raw.zst
+```
+
+The image carries `ansible-core`, so this works with no route to a Debian mirror.
+It is `ansible-core` rather than the full `ansible`: `ansible-playbook` is all the
+unit runs, and the difference is 37 packages instead of several hundred. Anything
+your playbook needs beyond the bundled collections has to be installed by the
+playbook itself.
+
+One adjustment happens on the way in. Podman writes that unit for Fedora CoreOS
+and gates it on `ConditionFirstBoot=yes`, which is never true here - this image
+ships `/etc/machine-id` empty and systemd still does not call the result a first
+boot, which is why `sshd-keygen` is not trusted with host keys either. Left alone
+the playbook would be skipped on every boot without a word, so the Ignition
+provider swaps that condition for a marker at `/var/lib/podman-machine-playbook-done`
+and has the unit create it. The "only once" promise is kept; delete the marker to
+run the playbook again.
+
 ## What is deliberately absent
 
 - **No Docker Engine.** `docker` is podman. Adding dockerd was tried and removed:

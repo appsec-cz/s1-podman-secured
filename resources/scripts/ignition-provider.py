@@ -85,6 +85,50 @@ FORBIDDEN_MOUNT_TARGETS = {
 }
 
 
+# Marker that keeps "podman machine init --playbook" a first boot affair once its
+# own first boot condition has been taken away.
+PLAYBOOK_DONE_MARKER = '/var/lib/podman-machine-playbook-done'
+
+
+def adapt_playbook_unit(contents: Optional[str]) -> Optional[str]:
+    """
+    Make podman's playbook.service capable of running in this image.
+
+    podman writes it for Fedora CoreOS and gates it on ConditionFirstBoot=yes.
+    That condition is never true here: the build ships /etc/machine-id empty, and
+    systemd still does not call the result a first boot - on this machine's very
+    first boot systemd-firstboot, first-boot-complete.target and sshd-keygen were
+    all skipped for exactly that reason, which is also why host keys are not left
+    to sshd-keygen. Applied unchanged, the playbook would be skipped on every boot
+    for ever, and say nothing while doing it.
+
+    A marker file replaces it, which keeps the "only once" promise without
+    depending on systemd's idea of a first boot. After=ready.service is left
+    alone: podman puts that unit in the same config, and it is real here.
+    """
+    if not contents:
+        return contents
+
+    out = []
+    replaced = False
+    for line in contents.splitlines():
+        if line.strip().lower().startswith('conditionfirstboot='):
+            out.append('ConditionPathExists=!' + PLAYBOOK_DONE_MARKER)
+            replaced = True
+            continue
+        out.append(line)
+        # '+' runs this one as root: the unit itself runs as the machine user,
+        # who cannot write to /var/lib.
+        if line.strip().lower().startswith('execstart='):
+            out.append('ExecStartPost=+/bin/touch ' + PLAYBOOK_DONE_MARKER)
+
+    if not replaced:
+        # Nothing gated it, so nothing would stop it running on every boot.
+        out.append('ConditionPathExists=!' + PLAYBOOK_DONE_MARKER)
+
+    return '\n'.join(out) + ('\n' if contents.endswith('\n') else '')
+
+
 def mount_unit_target(contents: Optional[str]) -> Optional[str]:
     """
     The Where= of a .mount unit, normalised for comparison.
@@ -704,6 +748,13 @@ class IgnitionProvider:
         enabled = unit_config.get('enabled', False)
         contents = unit_config.get('contents')
         dropins = unit_config.get('dropins', [])
+
+        if name == 'playbook.service':
+            contents = adapt_playbook_unit(contents)
+            logger.info(
+                "Adapted playbook.service: ConditionFirstBoot is never true in "
+                f"this image, so it now runs once and marks {PLAYBOOK_DONE_MARKER}"
+            )
 
         # A share mounted over a system directory does not announce itself. It
         # hides what the image put there and surfaces later as something that

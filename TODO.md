@@ -115,12 +115,7 @@ Copy host certificates into the VM for private registry access:
 - source: host certificate store via virtiofs
 - destination: `/etc/containers/certs.d/`
 
-### 6. Ansible playbook support
-
-Support `--playbook` from `podman machine init`: install Ansible in the base
-image and run the playbook after Ignition completes.
-
-### 7. Machine inspection endpoint
+### 6. Machine inspection endpoint
 
 Report machine configuration, resource usage and installed packages for
 `podman machine inspect` compatibility.
@@ -169,6 +164,16 @@ Report machine configuration, resource usage and installed packages for
   recognises the machine marker. Fixing the marker fixed forwarding.
 - **Timezone support.** Handled - Ignition sets `/etc/localtime` and the provider
   applies it.
+- **`podman machine init --playbook` did nothing.** The image now carries
+  `ansible-core`, but installing it was the smaller half. Podman writes
+  `playbook.service` for Fedora CoreOS and gates it on `ConditionFirstBoot=yes`,
+  which is never true in this image: the build ships `/etc/machine-id` empty and
+  systemd still does not call the result a first boot - on a real first boot
+  `systemd-firstboot`, `first-boot-complete.target` and `sshd-keygen` were all
+  skipped for that reason. Applied unchanged the playbook would have been skipped
+  on every boot for ever, silently. The provider swaps the condition for a marker
+  file and has the unit create it, so "only once" survives. `After=ready.service`
+  is left alone - podman puts that unit in the same config and it is real here.
 - **A share could be mounted over a system directory.** Wanted as a build time
   warning; it belongs where the mounts are actually created, in the Ignition
   provider, and refusing beats warning - a rejected share is recoverable, a

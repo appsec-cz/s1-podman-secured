@@ -433,6 +433,79 @@ class TestMountTargetValidation(unittest.TestCase):
         self.assertIn("Where=/usr", written.read_text())
 
 
+class TestPlaybookUnitAdaptation(unittest.TestCase):
+    """
+    podman writes playbook.service for Fedora CoreOS and gates it on
+    ConditionFirstBoot=yes. That is never true in this image - on a real first
+    boot systemd-firstboot, first-boot-complete.target and sshd-keygen were all
+    skipped for exactly that reason - so applied unchanged the playbook would be
+    skipped on every boot for ever, silently.
+    """
+
+    PODMAN_UNIT = (
+        "[Unit]\n"
+        "After=ready.service\n"
+        "ConditionFirstBoot=yes\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "User=core\n"
+        "Group=core\n"
+        "ExecStart=ansible-playbook /home/core/playbook.yaml\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=default.target\n"
+    )
+
+    def test_first_boot_condition_is_replaced(self):
+        out = ignition_provider.adapt_playbook_unit(self.PODMAN_UNIT)
+        self.assertNotIn("ConditionFirstBoot", out,
+                         "the condition that never fires must be gone")
+        self.assertIn("ConditionPathExists=!" + ignition_provider.PLAYBOOK_DONE_MARKER, out)
+
+    def test_it_still_runs_only_once(self):
+        out = ignition_provider.adapt_playbook_unit(self.PODMAN_UNIT)
+        # '+' runs it as root; the unit itself runs as the machine user, who
+        # cannot write to /var/lib, so without it the marker is never created
+        # and the playbook runs on every boot.
+        self.assertIn("ExecStartPost=+/bin/touch " + ignition_provider.PLAYBOOK_DONE_MARKER, out)
+
+    def test_podmans_own_ordering_is_left_alone(self):
+        # ready.service comes from the same Ignition config and is real here.
+        out = ignition_provider.adapt_playbook_unit(self.PODMAN_UNIT)
+        for keep in ("After=ready.service", "User=core", "Group=core",
+                     "ExecStart=ansible-playbook /home/core/playbook.yaml",
+                     "WantedBy=default.target"):
+            self.assertIn(keep, out, "%s must survive the rewrite" % keep)
+
+    def test_an_ungated_unit_gets_a_gate(self):
+        ungated = "[Service]\nExecStart=ansible-playbook /home/core/playbook.yaml\n"
+        out = ignition_provider.adapt_playbook_unit(ungated)
+        self.assertIn("ConditionPathExists=!", out,
+                      "nothing would otherwise stop it running on every boot")
+
+    def test_nothing_to_adapt(self):
+        self.assertIsNone(ignition_provider.adapt_playbook_unit(None))
+        self.assertEqual(ignition_provider.adapt_playbook_unit(""), "")
+
+    def test_only_playbook_service_is_adapted(self):
+        # Any other unit carrying ConditionFirstBoot is podman's business.
+        provider = IgnitionProvider()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        real_path = Path
+        with patch.object(ignition_provider, "Path",
+                          lambda p: real_path(tmp) / real_path(p).name), \
+             patch("subprocess.run"):
+            provider.enable_systemd_unit({
+                "name": "other.service",
+                "enabled": False,
+                "contents": "[Unit]\nConditionFirstBoot=yes\n[Service]\nExecStart=/bin/true\n",
+            })
+        self.assertIn("ConditionFirstBoot=yes",
+                      (real_path(tmp) / "other.service").read_text())
+
+
 class TestPodmanIgnitionCompatibility(unittest.TestCase):
     """Test compatibility with actual Podman-generated Ignition configs."""
 
