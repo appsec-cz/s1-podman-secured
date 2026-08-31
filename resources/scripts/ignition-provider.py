@@ -11,6 +11,7 @@ config over vsock port 1024.
 
 import json
 import os
+import re
 import sys
 import socket
 import subprocess
@@ -67,6 +68,51 @@ SKIPPED_UNITS = {
     'immutable-root-off.service': 'Debian root is not immutable; chattr -i / always fails',
     'immutable-root-on.service': 'Debian root is not immutable; nothing to set back',
 }
+
+
+# Directories a virtiofs share must never be mounted over. etc-containers.mount
+# above is one instance of this: a share landing on a system directory hides
+# everything the image put there, and the damage shows up later as something
+# unrelated - no image can be pulled, no published port is forwarded, the storage
+# driver is suddenly overlay.
+#
+# Matched exactly, never as a prefix. Podman's own default shares include
+# /var/folders, so rejecting everything under /var would reject a stock machine;
+# it is mounting *over* /var that destroys it.
+FORBIDDEN_MOUNT_TARGETS = {
+    '/', '/bin', '/boot', '/dev', '/etc', '/home', '/lib', '/lib64', '/proc',
+    '/root', '/run', '/sbin', '/sys', '/tmp', '/usr', '/var',
+}
+
+
+def mount_unit_target(contents: Optional[str]) -> Optional[str]:
+    """
+    The Where= of a .mount unit, normalised for comparison.
+
+    Systemd takes the last assignment when a key repeats, so this does too.
+    """
+    if not contents:
+        return None
+
+    target = None
+    for line in contents.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or line.startswith(';'):
+            continue
+        key, sep, value = line.partition('=')
+        if sep and key.strip().lower() == 'where':
+            target = value.strip()
+
+    if not target:
+        return None
+
+    # /usr/, //usr and /usr/. all name the same directory as /usr. Collapse the
+    # leading slashes first: POSIX leaves a leading '//' implementation defined
+    # and os.path.normpath preserves exactly two, so '//usr' would otherwise walk
+    # straight past the check below.
+    target = re.sub(r'^/+', '/', target)
+    normalised = os.path.normpath(target)
+    return normalised if normalised == '/' else normalised.rstrip('/')
 
 
 class IgnitionProvider:
@@ -658,6 +704,19 @@ class IgnitionProvider:
         enabled = unit_config.get('enabled', False)
         contents = unit_config.get('contents')
         dropins = unit_config.get('dropins', [])
+
+        # A share mounted over a system directory does not announce itself. It
+        # hides what the image put there and surfaces later as something that
+        # looks unrelated, so refuse it and say what it would have cost. A
+        # rejected share is recoverable; a machine whose /usr is gone is not.
+        if name.endswith('.mount'):
+            target = mount_unit_target(contents)
+            if target in FORBIDDEN_MOUNT_TARGETS:
+                logger.error(
+                    f"Refusing mount unit '{name}': it would mount over '{target}', "
+                    f"hiding everything the image provides there"
+                )
+                return
 
         # Write unit file if contents provided
         if contents:

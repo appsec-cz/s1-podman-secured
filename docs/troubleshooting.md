@@ -140,6 +140,29 @@ only ever appeared right after `deploy.sh`.
 Images built after this fix order `post-ignition-setup` before
 `systemd-user-sessions.service` and restart the user manager if it started anyway.
 
+## A `--volume` share never appears in the machine
+
+The journal names it:
+
+```
+Refusing mount unit 'usr.mount': it would mount over '/usr', hiding everything
+the image provides there
+```
+
+A share is refused when its target is a system directory - `/`, `/bin`, `/boot`,
+`/dev`, `/etc`, `/home`, `/lib`, `/lib64`, `/proc`, `/root`, `/run`, `/sbin`,
+`/sys`, `/tmp`, `/usr` or `/var`. Mounting over one of those hides everything the
+image put there, and the damage shows up later as something that looks unrelated:
+this is the same fault as podman's `etc-containers.mount`, which hid
+`policy.json` and cost an image that could not pull anything.
+
+The match is exact, never a prefix, so shares *under* those directories are fine -
+podman's own defaults include `/var/folders`. Mount somewhere of your own instead:
+
+```bash
+podman machine init -v "$HOME/work:/home/core/work"
+```
+
 ## Published ports are unreachable from macOS
 
 `podman run -p 8080:80` works inside the VM but `curl localhost:8080` on the Mac

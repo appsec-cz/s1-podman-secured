@@ -351,6 +351,88 @@ class TestIgnitionProvider(unittest.TestCase):
         self.assertTrue(os.path.exists(other_file))
 
 
+class TestMountTargetValidation(unittest.TestCase):
+    """
+    A virtiofs share mounted over a system directory hides everything the image
+    put there, and the damage surfaces later as something that looks unrelated.
+    etc-containers.mount was one instance and cost days; this is the general rule.
+    """
+
+    def unit(self, where):
+        return "[Mount]\nWhat=tag\nWhere=%s\nType=virtiofs\n" % where
+
+    def test_target_is_extracted_and_normalised(self):
+        for written, expected in (
+            ("/usr", "/usr"),
+            ("/usr/", "/usr"),
+            ("//usr", "/usr"),
+            ("/usr/.", "/usr"),
+            ("/var/folders/", "/var/folders"),
+            ("/", "/"),
+        ):
+            self.assertEqual(
+                ignition_provider.mount_unit_target(self.unit(written)), expected,
+                "Where=%s should normalise to %s" % (written, expected))
+
+    def test_target_ignores_comments_and_takes_the_last(self):
+        contents = "[Mount]\n# Where=/decoy\nWhere=/first\nWhere=/second\n"
+        self.assertEqual(ignition_provider.mount_unit_target(contents), "/second",
+                         "systemd takes the last assignment, so this must too")
+
+    def test_no_target(self):
+        self.assertIsNone(ignition_provider.mount_unit_target(None))
+        self.assertIsNone(ignition_provider.mount_unit_target("[Mount]\nWhat=tag\n"))
+
+    def test_system_directories_are_refused(self):
+        provider = IgnitionProvider()
+        for target in ("/", "/usr", "/etc", "/home", "/var", "/dev", "/proc", "/sys"):
+            with patch.object(ignition_provider, "Path") as mock_path:
+                provider.enable_systemd_unit({
+                    "name": "danger.mount",
+                    "enabled": True,
+                    "contents": self.unit(target),
+                })
+                mock_path.assert_not_called()
+
+    def test_podmans_own_default_shares_are_allowed(self):
+        # Rejecting everything under /var would reject a stock machine: podman
+        # mounts /var/folders by default. It is mounting over /var that destroys.
+        for target in ("/Users", "/private", "/var/folders", "/etc/containers",
+                       "/home/core/work", "/opt/data"):
+            self.assertNotIn(ignition_provider.mount_unit_target(self.unit(target)),
+                             ignition_provider.FORBIDDEN_MOUNT_TARGETS,
+                             "%s is a legitimate share target" % target)
+
+    def test_forbidden_set_covers_the_documented_paths(self):
+        for path in ("/bin", "/boot", "/dev", "/etc", "/home", "/proc", "/root",
+                     "/run", "/sbin", "/sys", "/tmp", "/usr", "/var"):
+            self.assertIn(path, ignition_provider.FORBIDDEN_MOUNT_TARGETS)
+
+    def test_non_mount_units_are_untouched(self):
+        # Only .mount units carry a Where=; a service naming one of these paths
+        # must not be refused. Written into a real temporary directory: handing
+        # the module a mock Path lets the genuine open() receive a MagicMock,
+        # whose __index__ is 1, so it opens and then closes stdout.
+        provider = IgnitionProvider()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+
+        real_path = Path
+        with patch.object(ignition_provider, "Path",
+                          lambda p: real_path(tmp) / real_path(p).name), \
+             patch("subprocess.run"):
+            provider.enable_systemd_unit({
+                "name": "harmless.service",
+                "enabled": False,
+                "contents": "[Service]\nExecStart=/bin/true\nWhere=/usr\n",
+            })
+
+        written = real_path(tmp) / "harmless.service"
+        self.assertTrue(written.exists(),
+                        "a .service must still be written even if it mentions /usr")
+        self.assertIn("Where=/usr", written.read_text())
+
+
 class TestPodmanIgnitionCompatibility(unittest.TestCase):
     """Test compatibility with actual Podman-generated Ignition configs."""
 

@@ -115,17 +115,12 @@ Copy host certificates into the VM for private registry access:
 - source: host certificate store via virtiofs
 - destination: `/etc/containers/certs.d/`
 
-### 6. Volume mount validation at build time
-
-Warn about forbidden mount paths: `/bin`, `/boot`, `/dev`, `/etc`, `/home`,
-`/proc`, `/root`, `/run`, `/sbin`, `/sys`, `/tmp`, `/usr`, `/var`.
-
-### 7. Ansible playbook support
+### 6. Ansible playbook support
 
 Support `--playbook` from `podman machine init`: install Ansible in the base
 image and run the playbook after Ignition completes.
 
-### 8. Machine inspection endpoint
+### 7. Machine inspection endpoint
 
 Report machine configuration, resource usage and installed packages for
 `podman machine inspect` compatibility.
@@ -174,6 +169,13 @@ Report machine configuration, resource usage and installed packages for
   recognises the machine marker. Fixing the marker fixed forwarding.
 - **Timezone support.** Handled - Ignition sets `/etc/localtime` and the provider
   applies it.
+- **A share could be mounted over a system directory.** Wanted as a build time
+  warning; it belongs where the mounts are actually created, in the Ignition
+  provider, and refusing beats warning - a rejected share is recoverable, a
+  machine whose `/usr` is gone is not. The match is exact rather than by prefix,
+  because podman's own default shares include `/var/folders` and a prefix rule on
+  `/var` would reject a stock machine. This generalises the hard-coded
+  `etc-containers.mount` exception that was already there for the same reason.
 - **No way to ask a stuck machine how it was doing.** Wanted as a vsock endpoint;
   that turned out to be impossible, not merely awkward. Podman gives the VM one
   vsock device, port 1025, and the unix socket behind it exists only while
