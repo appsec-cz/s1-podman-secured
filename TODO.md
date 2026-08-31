@@ -102,11 +102,6 @@ Copy host certificates into the VM for private registry access:
 - source: host certificate store via virtiofs
 - destination: `/etc/containers/certs.d/`
 
-### 5. Machine inspection endpoint
-
-Report machine configuration, resource usage and installed packages for
-`podman machine inspect` compatibility.
-
 ## Known unknowns
 
 - SentinelOne's scanner logs 63 `scanner error 1` entries, 19 of them on files in
@@ -151,6 +146,18 @@ Report machine configuration, resource usage and installed packages for
   recognises the machine marker. Fixing the marker fixed forwarding.
 - **Timezone support.** Handled - Ignition sets `/etc/localtime` and the provider
   applies it.
+- **A machine inspection endpoint - dropped, the premise was wrong.** It was
+  written as reporting configuration, resource usage and installed packages "for
+  `podman machine inspect` compatibility". That command never asks the guest
+  anything: every field it prints comes from podman's own config file on the Mac,
+  and `.Resources.*` is the allocation the machine was given, not what it uses.
+  The proof came for free while chasing the boot deadlock - with the guest
+  completely unreachable, sshd not listening and gvproxy dead,
+  `podman machine inspect --format '{{.AppleHypervisor.Vfkit.Endpoint}}'` still
+  answered normally. There is no hook for a guest to contribute fields, so
+  nothing built here could ever have reached it. What configuration is worth
+  checking is already covered by `podman-machine-diagnostics`; usage and package
+  lists had no consumer once the compatibility claim fell away.
 - **Nothing enabled `podman.socket` if Ignition did not.** That socket is what
   the podman client on the Mac connects to, so losing it loses the machine
   entirely. `post-ignition-setup` now writes the wants symlink itself when
