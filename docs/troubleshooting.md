@@ -140,6 +140,48 @@ only ever appeared right after `deploy.sh`.
 Images built after this fix order `post-ignition-setup` before
 `systemd-user-sessions.service` and restart the user manager if it started anyway.
 
+## Everything TLS fails: pulls, apt, the agent
+
+A corporate network that inspects TLS re-signs traffic with its own CA, and
+nothing in the machine trusts it. Podman has a flag for exactly this:
+
+```bash
+podman machine init --import-native-ca --image podman-debian.raw.zst
+```
+
+It reads the Mac's trusted CAs, copies them into the guest and updates the trust
+store. Both halves are written for Fedora CoreOS - podman copies into
+`/etc/pki/ca-trust/source/anchors` and runs `sudo update-ca-trust` - so this image
+provides both under those names and maps them onto Debian's
+`update-ca-certificates`. Check it took:
+
+```bash
+podman machine ssh <machine> 'grep -c "BEGIN CERTIFICATE" /etc/ssl/certs/ca-certificates.crt'
+podman machine ssh <machine> 'ls /usr/local/share/ca-certificates/'
+```
+
+The flag is read on every start, not only at init, so an existing machine picks
+up a new corporate CA on its next `podman machine start` once it is set.
+
+**Containers do not inherit this.** Every image carries its own trust store, so
+`curl`, `pip`, `npm` and `apt` inside a container keep failing however much the
+machine trusts. There is no podman-wide switch; either bake the CA into your own
+base images, or mount it per run:
+
+```bash
+podman run -v /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro ...
+```
+
+**The SentinelOne agent is a separate matter.** It reports
+`Secured protocol mode: enforced` and EDR agents commonly pin their certificates,
+so inspection tends to break the agent rather than merely inconvenience it. Have
+the agent's traffic excluded from inspection at the network level - trusting the
+CA in the guest is not a substitute.
+
+**The build needs it too.** `build.sh` fetches the Debian cloud image over HTTPS
+and runs debootstrap and apt, so behind inspection it is the build host's trust
+store that has to hold the CA, before any of the above applies.
+
 ## A `--volume` share never appears in the machine
 
 The journal names it:

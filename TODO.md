@@ -94,14 +94,6 @@ expectations) behave differently. `podman machine set --rootful` switches it; if
 that is ever done, `/run/docker.sock` has to be repointed at
 `/run/podman/podman.sock`.
 
-### 4. SSL certificate handling
-
-**Impact**: enterprise users with private registries
-
-Copy host certificates into the VM for private registry access:
-- source: host certificate store via virtiofs
-- destination: `/etc/containers/certs.d/`
-
 ## Known unknowns
 
 - SentinelOne's scanner logs 63 `scanner error 1` entries, 19 of them on files in
@@ -158,6 +150,21 @@ Copy host certificates into the VM for private registry access:
   nothing built here could ever have reached it. What configuration is worth
   checking is already covered by `podman-machine-diagnostics`; usage and package
   lists had no consumer once the compatibility claim fell away.
+- **TLS inspection broke everything and `--import-native-ca` did not help.**
+  Recorded as private-registry certificates and `certs.d`; the real case is a
+  network that re-signs TLS with a corporate CA, which breaks pulls, apt in the
+  guest and the agent alike. Podman already has `--import-native-ca` for it, but
+  it is hard-coded for Fedora CoreOS: it copies into
+  `/etc/pki/ca-trust/source/anchors` and runs `sudo update-ca-trust`, neither of
+  which exists on Debian, so the flag imported nothing. The image now provides
+  both under those names, mapped onto `update-ca-certificates`. Two details
+  decided whether it actually worked: Debian only reads `*.crt` while podman
+  writes `host-ca-certs.pem`, and `openssl rehash` skips any file holding more
+  than one certificate - so the concatenated bundle had to be split, or the CAs
+  would have been trusted by CAfile and refused by CApath. Containers still do
+  not inherit any of it, and the agent needs excluding from inspection rather
+  than trusting the CA; both are written up in
+  [docs/troubleshooting.md](docs/troubleshooting.md).
 - **Nothing enabled `podman.socket` if Ignition did not.** That socket is what
   the podman client on the Mac connects to, so losing it loses the machine
   entirely. `post-ignition-setup` now writes the wants symlink itself when

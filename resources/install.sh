@@ -207,6 +207,12 @@ install -m 755 "$RESOURCES/scripts/podman-machine-ready.sh" /usr/local/bin/podma
 # of what it is for.
 install -m 755 "$RESOURCES/scripts/machine-diagnostics.sh" /usr/local/bin/podman-machine-diagnostics
 install -m 755 "$RESOURCES/scripts/machine-health.sh" /usr/local/bin/podman-machine-health
+# Fedora's name, on Debian's PATH: this is what "podman machine init
+# --import-native-ca" runs in the guest, and sudo finds /usr/local/sbin first.
+install -m 755 "$RESOURCES/scripts/update-ca-trust.sh" /usr/local/sbin/update-ca-trust
+# podman copies the host CA bundle in here before running the command above, so
+# the directory has to exist already.
+mkdir -p /etc/pki/ca-trust/source/anchors
 install -m 755 "$RESOURCES/scripts/rosetta-activate.sh" /usr/local/bin/rosetta-activate.sh
 echo "✓ Scripts installed"
 

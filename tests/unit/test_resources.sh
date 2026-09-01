@@ -243,6 +243,33 @@ test_ansible_is_in_the_image() {
         "the image carries ansible-core for --playbook"
 }
 
+test_import_native_ca_lands_somewhere_debian_reads() {
+    # "podman machine init --import-native-ca" is how a machine works behind TLS
+    # inspection, and it is hard-coded for Fedora: it copies the host CAs into
+    # /etc/pki/ca-trust/source/anchors and runs "sudo update-ca-trust". Neither
+    # exists on Debian, so without a stand-in the flag imports nothing.
+    local shim install
+    shim=$(cat "$ROOT/resources/scripts/update-ca-trust.sh")
+    install=$(cat "$ROOT/resources/install.sh")
+
+    assert_contains "$install" "/usr/local/sbin/update-ca-trust" \
+        "the Fedora command name exists on a path sudo searches"
+    assert_contains "$install" "mkdir -p /etc/pki/ca-trust/source/anchors" \
+        "and the folder podman copies into exists before it does"
+    assert_contains "$shim" "/usr/sbin/update-ca-certificates" \
+        "the shim ends in Debian's own trust update"
+
+    # update-ca-certificates only reads *.crt, and podman writes
+    # host-ca-certs.pem - the extension has to change on the way across.
+    assert_contains "$shim" '.crt' "anchors are renamed to the extension Debian reads"
+
+    # openssl rehash skips a file holding more than one certificate, so a
+    # concatenated bundle would land in ca-certificates.crt and never get a hash
+    # link - trust by CAfile, refusal by CApath.
+    assert_contains "$shim" "BEGIN CERTIFICATE" \
+        "the bundle is split so each certificate gets its own hash link"
+}
+
 test_podman_socket_fallback() {
     # Without this socket nothing on the Mac can reach the machine at all, so a
     # config that failed to enable it is a total failure - worth a net even
