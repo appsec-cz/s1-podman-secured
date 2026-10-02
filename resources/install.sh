@@ -300,6 +300,15 @@ echo "✓ Docker storage compatibility symlink created"
 systemctl enable podman.socket
 echo "✓ Podman rootful socket enabled"
 
+# Containers with --restart=always are started at boot by podman-restart.service,
+# run by each user's own manager - the rootless containers by core's. The unit
+# ships with "preset: enabled", but Debian never applies presets to user units,
+# so it stayed disabled and every such container was left down after a machine
+# restart. --global enables it for every user manager, as Fedora CoreOS has it.
+systemctl --global enable podman-restart.service
+systemctl enable podman-restart.service
+echo "✓ podman-restart enabled (restart=always survives a machine restart)"
+
 # btrfs root filesystem post-processing
 if [ "$(stat -f -c %T /)" = "btrfs" ]; then
     echo ""

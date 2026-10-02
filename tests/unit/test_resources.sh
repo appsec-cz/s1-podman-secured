@@ -441,6 +441,17 @@ test_health_reports_ssh() {
     assert_contains "$health" "Maxstartups" "and counts connections sshd dropped"
 }
 
+test_restart_always_survives_a_machine_restart() {
+    # Debian does not apply presets to user units, so podman-restart.service sat
+    # disabled and --restart=always containers stayed down after every restart.
+    local install
+    install=$(grep -vE '^[[:space:]]*#' "$ROOT/resources/install.sh")
+    assert_contains "$install" "systemctl --global enable podman-restart.service" \
+        "podman-restart is enabled for rootless containers"
+    assert_matches "$install" '^systemctl enable podman-restart\.service$' \
+        "and for rootful ones"
+}
+
 test_documentation_links_resolve() {
     # Docs rot quietly; a link to a file that was renamed is worse than no link.
     local doc target missing=0

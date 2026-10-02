@@ -121,6 +121,16 @@ test_no_docker_engine() {
     assert_not_contains "$status" "install ok installed" "no Docker Engine in the image"
 }
 
+test_restart_always_is_honoured_at_boot() {
+    # Debian leaves user unit presets unapplied, so this was disabled and every
+    # --restart=always container stayed down after a machine restart.
+    local rootless rootful
+    rootless=$(guest 'systemctl --user is-enabled podman-restart.service' 2>/dev/null | tr -d '\r')
+    rootful=$(guest 'systemctl is-enabled podman-restart.service' 2>/dev/null | tr -d '\r')
+    assert_eq "enabled" "$rootless" "podman-restart is enabled for the machine user"
+    assert_eq "enabled" "$rootful" "podman-restart is enabled for root"
+}
+
 test_user_can_read_journal() {
     # Regression: without this, podman logs returns nothing and kind never starts.
     local groups
