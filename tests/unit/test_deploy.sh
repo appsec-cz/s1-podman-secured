@@ -132,6 +132,15 @@ test_verify_refuses_a_backup_without_its_lists() {
         "restore refuses a directory without a manifest"
 }
 
+test_restore_starts_only_what_was_running() {
+    # kube play started everything it created: two containers on one port - one
+    # normally stopped - collided, and stopped ones ran for a moment.
+    assert_contains "$DEPLOY" 'podman kube play --start=false --no-pod-prefix' \
+        "the restore creates without starting"
+    assert_contains "$DEPLOY" 'done < "$DIR/running.txt"' "and starts only what was running"
+    assert_not_contains "$DEPLOY" 'podman stop -t 5 "$c"' "instead of stopping the rest afterwards"
+}
+
 test_kind_nodes_are_left_behind() {
     # A kind node is a running kubelet with etcd behind it; replaying its
     # definition does not give back a working cluster.

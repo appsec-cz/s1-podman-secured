@@ -538,10 +538,15 @@ fi
 # kube play always builds a pod, but --no-pod-prefix keeps the container itself
 # under its own name instead of <pod>-<name>. Every script and habit built around
 # those names has to still work on the other side of an update.
+#
+# --start=false: everything is created first, and only what was running is
+# started below. kube play used to start every container it made, so two that
+# publish the same port - one of them normally stopped - collided, the second
+# play failed, and stopped containers ran for a moment they never should have.
 for f in "$DIR"/containers/*.yaml; do
     [ -e "$f" ] || continue
-    podman kube play --no-pod-prefix "$f" >/dev/null 2>&1 ||
-        podman kube play "$f" >/dev/null 2>&1 ||
+    podman kube play --start=false --no-pod-prefix "$f" >/dev/null 2>&1 ||
+        podman kube play --start=false "$f" >/dev/null 2>&1 ||
         echo "RESTORE_FAIL play $(basename "$f" .yaml)"
 done
 
@@ -564,10 +569,13 @@ if [ -s "$DIR/expected.txt" ]; then
         done < "$DIR/members.txt"
     fi
 
-    # kube play starts everything it creates; stop again what was not running.
-    while read -r c; do
-        grep -qx "$c" "$DIR/running.txt" 2>/dev/null || podman stop -t 5 "$c" >/dev/null 2>&1 || true
-    done < "$DIR/expected.txt"
+    # Start what was running, nothing else. A container in a pod brings its
+    # pod up with it.
+    if [ -s "$DIR/running.txt" ]; then
+        while read -r c; do
+            podman start "$c" >/dev/null 2>&1 || echo "RESTORE_FAIL start $c"
+        done < "$DIR/running.txt"
+    fi
 fi
 '
 
