@@ -16,6 +16,7 @@ load helpers.network
 function setup() {
     basic_setup
     skip_if_not_rootless "pasta networking only available in rootless mode"
+    skip_if_no_pasta "pasta not found: install pasta(1) to run these tests"
 
     XFER_FILE="${PODMAN_TMPDIR}/pasta.bin"
 }
@@ -302,7 +303,6 @@ function pasta_test_do() {
 }
 
 @test "IPv6 default address assignment" {
-    skip "Host ipv6 set can vary vastly and may not have one true default address"
     skip_if_no_ipv6 "IPv6 not routable on the host"
 
     run_podman run --rm --net=pasta $IMAGE ip -j -6 address show

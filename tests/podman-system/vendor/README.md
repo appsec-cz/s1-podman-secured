@@ -86,6 +86,7 @@ Requirements
 - bats
 - jq
 - skopeo
+- nmap-ncat
 - httpd-tools
 - openssl
 - socat

@@ -64,20 +64,23 @@ back instead of failing.
 
 ## Kernel and container stack
 
-| | Debian stable | this image |
-|---|---|---|
-| kernel | 6.12 | **7.1** from trixie-backports |
-| podman | 5.4.2 | **5.8.4** from unstable |
-| crun | 1.21 | **1.28** from unstable |
-| netavark / aardvark-dns | 1.14 | **1.17** from unstable |
+| | source |
+|---|---|
+| kernel | **7.1** from trixie-backports (stable has 6.12) |
+| passt | trixie-backports |
+| podman, crun, netavark, aardvark-dns, conmon | trixie, with trixie-security |
+| everything else | trixie, with trixie-updates and trixie-security |
 
-Backports carries no container packages for trixie - only the kernel - so the
-container stack comes from unstable, pinned to priority 100 so nothing else
-drifts and only those five packages are taken explicitly.
+The container stack is Debian stable's, because that is the only place it has
+security support. It came from unstable for a while, for podman 5.8; that ended
+when unstable moved to glibc 2.43 and its podman began to pull libc, systemd and
+OpenSSL from unstable with it - about 156 packages. Testing is no different, and
+backports carries none of the five.
 
-Neither backports nor unstable is covered by Debian's security team. That is a
-deliberate trade for a current runtime, and it is written down next to the code
-that makes it in `resources/install.sh`.
+Backports is not covered by Debian's security team either, but its packages are
+refreshed from testing, and the source stays enabled in the image so the kernel
+and passt keep receiving those refreshes. The build fails if any installed
+package comes from anywhere else, or if a source outside trixie is configured.
 
 ## x86_64 containers
 
@@ -99,7 +102,7 @@ setting has to live in the real config file - `deploy.sh` puts it there.
 Podman 6 ships an `etc-containers.mount` unit in its Ignition config that mounts
 the host's `~/.config/containers` over `/etc/containers` inside the VM. On a
 CoreOS machine that shares the host's registry configuration; on this image it
-hides everything the image put there, and the guest runs podman 5.8, which reads:
+hides everything the image put there, and the guest's podman reads:
 
 - `storage.conf` - without it the storage driver falls back to overlay
 - `containers.conf` - runtime, netns and dns settings silently ignored

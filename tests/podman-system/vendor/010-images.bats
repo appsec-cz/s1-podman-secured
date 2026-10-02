@@ -259,45 +259,41 @@ Labels.created_at | 20[0-9-]\\\+T[0-9:]\\\+Z
     run_podman inspect --format '{{.ID}}' $IMAGE
     imageID=$output
 
-    run_podman pod inspect --format "{{.InfraContainerID}}" $pname
-    infra_ID="$output"
+    pauseImage=$(pause_image)
+    run_podman inspect --format '{{.ID}}' $pauseImage
+    pauseID=$output
 
     run_podman 2 rmi -a
-    is "$output" "Error: image used by .*: image is in use by a container: consider listing external containers and force-removing image"
+    is "$output" "Error: 2 errors occurred:
+.** image used by .*: image is in use by a container: consider listing external containers and force-removing image
+.** image used by .*: image is in use by a container: consider listing external containers and force-removing image"
 
     run_podman rmi -af
     is "$output" "Untagged: $IMAGE
-Deleted: $imageID" "image gets removed"
+Untagged: $pauseImage
+Deleted: $imageID
+Deleted: $pauseID" "infra images gets removed as well"
 
     run_podman images --noheading
     is "$output" ""
-    run_podman ps --all --noheading --no-trunc
-    assert "$output" =~ ".*$infra_ID.*" "infra container still running"
+    run_podman ps --all --noheading
+    is "$output" ""
     run_podman pod ps --noheading
-    assert "$output" =~ ".*$pname.*" "pod still running"
+    is "$output" ""
 
+    run_podman create --pod new:$pname $IMAGE
     # Clean up
+    run_podman rm "${lines[-1]}"
     run_podman pod rm -a
+    run_podman rmi $pauseImage
 }
 
 # CANNOT BE PARALLELIZED: relies on exact output from podman images
 @test "podman images - rmi -f can remove infra images" {
     pname=p_$(safename)
+    run_podman create --pod new:$pname $IMAGE
 
-    # Create a custom image so we can test --infra-image and -command.
-    # It will have a randomly generated infra command, using the
-    # existing 'pause' script in our testimage. We assign a bogus
-    # entrypoint to confirm that --infra-command will override.
-    local pauseImage="infra_image_$(safename)"
-    # --layers=false needed to work around buildah#5674 parallel flake
-    run_podman build -t $pauseImage --layers=false - << EOF
-FROM $IMAGE
-ENTRYPOINT ["/home/podman/pause"]
-EOF
-
-    run_podman --noout pod create --name $pname --infra-image "$pauseImage"
-    run_podman create --pod $pname $IMAGE
-
+    pauseImage=$(pause_image)
     run_podman inspect --format '{{.ID}}' $pauseImage
     pauseID=$output
 
@@ -305,7 +301,7 @@ EOF
     is "$output" "Error: image used by .* image is in use by a container: consider listing external containers and force-removing image"
 
     run_podman rmi -f $pauseImage
-    is "$output" "Untagged: localhost/$pauseImage:latest
+    is "$output" "Untagged: $pauseImage
 Deleted: $pauseID"
 
     # Force-removing the infra container removes the pod and all its containers.
@@ -334,7 +330,6 @@ Deleted: $pauseID"
     run_podman image rm --force bogus
     is "$output" "" "Should print no output"
 
-    _prefetch $IMAGE
     random_image_name=i_$(safename)
     run_podman image tag $IMAGE $random_image_name
     run_podman image rm --force bogus $random_image_name
@@ -391,7 +386,6 @@ EOF
             | grep -vF '[storage.options]' >>$sconf
     fi
 
-    _prefetch $IMAGE
     skopeo copy containers-storage:$IMAGE \
            containers-storage:\[${storagedriver}@${imstore}/root+${imstore}/runroot\]$IMAGE
 
@@ -434,7 +428,7 @@ EOF
     # that listing all images does not fail (see BZ 2216700).
     for i in $(seq --format '%02g' 1 $count); do
         timeout --foreground -v --kill=10 60 \
-                "${PODMAN_CMD[@]}" rmi img-$i-$(safename) &
+                $PODMAN rmi img-$i-$(safename) &
     done
 
     tries=100

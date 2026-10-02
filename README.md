@@ -47,15 +47,17 @@ podman run --rm --arch amd64 alpine uname -m # x86_64, translated by Rosetta
 ## What is in the image
 
 - **btrfs root** with zstd compression; image layers are btrfs subvolumes
-- **Kernel 7.1** from Debian backports
-- **podman 5.8**, crun, netavark and aardvark-dns from Debian unstable, pinned
+- **Kernel 7.1** and passt from trixie-backports
+- **podman 5.4**, crun, netavark and aardvark-dns from trixie, covered by
+  Debian's security team
 - **Rosetta** as the primary x86_64 path, qemu-user as the fallback
 - **Ignition provider** so Podman Desktop and `podman machine` drive it like they
   drive Fedora CoreOS
 - **No Docker Engine** - `docker` is podman, and podman serves the Docker API
 
-Neither backports nor unstable is covered by Debian's security team. That trade
-is deliberate and documented in [docs/architecture.md](docs/architecture.md).
+Backports is not covered by Debian's security team; what comes from it, and why,
+is documented in [docs/architecture.md](docs/architecture.md). Nothing comes from
+unstable or testing, and the build fails if anything does.
 
 ## SentinelOne and licensing
 

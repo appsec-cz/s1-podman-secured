@@ -76,46 +76,34 @@ fi
 echo "✓ All critical packages and binaries verified"
 
 echo ""
-echo "=== Upgrading the container stack from unstable ==="
-# Debian stable ships podman 5.4.2 and never moves; trixie-backports carries no
-# container packages at all, only the kernel. Unstable has podman 5.8.x, and the
-# upgrade is unusually contained: podman, crun, netavark, aardvark-dns and conmon,
-# with no libc or systemd pulled along.
-#
-# Unstable gets no security support, which is a real cost for this image. It is
-# limited as tightly as apt allows: unstable is pinned below stable, so nothing
-# else drifts, and only these five packages are taken from it explicitly.
-cat > /etc/apt/sources.list.d/containers-unstable.list <<'SOURCES'
-deb http://deb.debian.org/debian sid main
-SOURCES
-cat > /etc/apt/preferences.d/containers-unstable <<'PINNING'
-Package: *
-Pin: release a=unstable
-Pin-Priority: 100
-PINNING
+echo "=== Container stack ==="
+# podman, crun, netavark, aardvark-dns and conmon come from trixie itself, where
+# Debian's security team covers them and fixes arrive through trixie-security.
+# The stack used to come from unstable for podman 5.8; that stopped being a
+# contained choice when unstable moved to glibc 2.43 - its podman now drags in
+# libc, systemd and OpenSSL from unstable, about 156 packages, and testing is no
+# different. Backports carries none of these five.
+for pkg in podman crun netavark aardvark-dns conmon; do
+    printf '  %s %s\n' "$pkg" "$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)"
+done
 
+echo ""
+echo "=== Enabling trixie-backports ==="
+# Kept in the image, not removed after the build. Backports is pinned at 100 by
+# its own release file, so it never replaces a package from trixie, but what was
+# installed from it - the kernel and passt below - keeps receiving the backport's
+# updates through apt-get upgrade. Removing the source used to freeze the kernel
+# at whatever the build took.
+echo 'deb http://deb.debian.org/debian trixie-backports main' > /etc/apt/sources.list.d/backports.list
 apt-get update -qq
-CONTAINER_STACK="podman crun netavark aardvark-dns conmon"
-echo "Before: $(dpkg-query -W -f='${Version}' podman 2>/dev/null)"
 
-if apt-get install -y -t sid $CONTAINER_STACK; then
-    for pkg in $CONTAINER_STACK; do
-        printf '  %s %s\n' "$pkg" "$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)"
-    done
-    echo "✓ Container stack upgraded from unstable"
+# passt provides pasta, rootless podman's network. It is a self-contained binary
+# with a stable command line, and backports carries a release a year newer.
+if apt-get install -y -t trixie-backports passt; then
+    echo "✓ passt from backports: $(dpkg-query -W -f='${Version}' passt)"
 else
-    echo "WARNING: could not upgrade the container stack, keeping the stable versions"
+    echo "WARNING: could not install passt from backports, keeping trixie's"
 fi
-
-# The pin stays in the image on purpose. At priority 100 unstable never wins
-# over stable for a package that came from stable, so a later apt-get upgrade in
-# the running machine leaves the rest of the system on trixie. The five packages
-# taken from unstable do follow it - but only while their newer builds still
-# run on trixie's libraries. Once unstable rebuilds one against something newer
-# (podman 5.8.6+ds1-2+b1 needs libc6 2.43, trixie has 2.41), apt keeps it back,
-# and from then on it gets no updates in place at all, security fixes included.
-# Rebuilding the image is the only way forward from that point.
-apt-get update -qq
 
 echo ""
 echo "=== Installing a newer kernel from backports ==="
@@ -146,9 +134,6 @@ kernel_packages() {
 
 OLD_KERNEL_PKGS=$(kernel_packages | tr '\n' ' ')
 echo "Kernel packages before: ${OLD_KERNEL_PKGS:-none}"
-
-echo 'deb http://deb.debian.org/debian trixie-backports main' > /etc/apt/sources.list.d/backports.list
-apt-get update -qq
 
 if apt-get install -y -t trixie-backports "linux-image-$DEB_ARCH"; then
     # Highest version wins; ignore the -unsigned variants when picking it.
@@ -189,8 +174,26 @@ else
     echo "WARNING: could not install the backports kernel, keeping ${OLD_KERNEL_PKGS:-the stable kernel}"
 fi
 
-rm -f /etc/apt/sources.list.d/backports.list
-apt-get update -qq
+echo ""
+echo "=== Verifying package origins ==="
+# Every installed package has to come from trixie, its updates and security
+# suites, or trixie-backports. apt calls a package "local" when no configured
+# source offers the installed version - which is what anything from unstable or
+# testing would be, since neither is configured. The agent package is the one
+# expected exception: it is installed from a file.
+FOREIGN=$(apt list --installed 2>/dev/null | grep ',local\]' | cut -d/ -f1 \
+    | grep -vx 'sentinelagent' || true)
+if [ -n "$FOREIGN" ]; then
+    echo "ERROR: installed packages that no trixie source provides:"
+    printf '  %s\n' $FOREIGN
+    exit 1
+fi
+if grep -rqsE '^[^#]*\b(sid|unstable|testing|forky)\b' /etc/apt/sources.list /etc/apt/sources.list.d/; then
+    echo "ERROR: an apt source outside trixie is configured:"
+    grep -rsE '^[^#]*\b(sid|unstable|testing|forky)\b' /etc/apt/sources.list /etc/apt/sources.list.d/
+    exit 1
+fi
+echo "✓ Every package comes from trixie, trixie-security, trixie-updates or trixie-backports"
 
 echo ""
 echo "=== Installing scripts ==="

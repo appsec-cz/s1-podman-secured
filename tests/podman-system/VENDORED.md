@@ -60,6 +60,10 @@ the suite is thorough and the machine is created from scratch.
 
 ## Baseline: what this suite does on this image
 
+The image is back on trixie's podman 5.4.2 and the suite on v5.4.2. A baseline
+for that combination has not been recorded yet; the breakdown below is from
+podman 5.8.4 and stays as the reference until it is.
+
 Full run against the image built on 2026-08-24 - kernel 7.1.8 from backports,
 podman 5.8.4 from unstable - rootless, in a throwaway machine:
 

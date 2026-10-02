@@ -70,8 +70,9 @@ build fails rather than quietly producing an image without an agent.
    old UUID or does not reference the new one.
 5. Uploads the package list into the image.
 6. Runs `resources/install.sh` inside the image: applies every pending Debian
-   update, installs and **verifies every package on the list**, upgrades the container stack from unstable, replaces
-   the kernel with the backports one, installs the provider, services and
+   update, installs and **verifies every package on the list**, takes passt and
+   the kernel from backports and purges the stable kernel, **fails if any
+   package comes from outside trixie**, installs the provider, services and
    configuration, and drops the btrfs rollback subvolume.
 7. **Verifies the bootloader again** - installing a kernel regenerates
    `grub.cfg` - and asserts exactly one kernel is left in `/boot`.
@@ -85,6 +86,7 @@ Each of these is a gate, because each corresponds to something that once shipped
 - a package the build intended to install that is not actually installed
 - more than one kernel, or none
 - `INSTALL_SENTINELONE=1` without an agent package
+- a package from outside trixie, or an apt source for unstable or testing
 
 ## After building
 
@@ -100,8 +102,8 @@ actually has. See [testing.md](testing.md).
 
 ## Rebuilding when Debian moves
 
-The container stack and the kernel float with unstable and backports, so two
-things drift:
+The container stack follows trixie and its security updates; the kernel and
+passt follow backports. Two things drift:
 
 - **podman's version.** The vendored test suite is pinned to the podman in the
   image. After a rebuild, check `podman --version` in the machine and re-sync:

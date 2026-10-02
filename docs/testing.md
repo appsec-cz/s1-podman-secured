@@ -78,7 +78,7 @@ That is how the storage driver change was validated before it was committed.
 version inside the image. When the image's podman moves:
 
 ```bash
-PODMAN_VERSION=v5.8.4 ./tests/podman-system/sync.sh
+PODMAN_VERSION=v5.4.2 ./tests/podman-system/sync.sh
 ```
 
 The runner compares the two versions and warns when they drift, because a suite

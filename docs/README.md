@@ -24,8 +24,8 @@ The image provides:
 - **btrfs root** with zstd compression; podman stores image layers as btrfs
   subvolumes rather than overlay directories
 - **Kernel 7.1** from Debian backports instead of stable's 6.12
-- **podman 5.8** with crun, netavark and aardvark-dns from Debian unstable,
-  pinned so nothing else follows them in
+- **podman 5.4** with crun, netavark and aardvark-dns from trixie, so security
+  fixes arrive through trixie-security
 - **Rosetta** as the primary path for x86_64 containers, with qemu-user as the
   fallback where Rosetta is unavailable
 - **Ignition provider** so Podman Desktop and `podman machine` drive it exactly

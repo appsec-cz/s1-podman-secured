@@ -329,21 +329,28 @@ test_missing_sentinelone_fails_the_build() {
         "build.sh fails when the agent is requested but absent"
 }
 
-test_container_stack_from_unstable() {
-    # Stable's podman never moves and backports carries no container packages at
-    # all, so the stack comes from unstable - pinned, so nothing else follows it.
+test_container_stack_from_trixie() {
+    # unstable's podman moved to glibc 2.43 and would have dragged libc, systemd
+    # and OpenSSL along - about 156 packages - with no security support. The
+    # stack comes from trixie, where trixie-security covers it.
     local install
-    install=$(cat "$ROOT/resources/install.sh")
-    assert_contains "$install" "sid main" "install.sh adds unstable as a source"
-    assert_contains "$install" "Pin-Priority: 100" "unstable is pinned below stable"
-    assert_contains "$install" 'apt-get install -y -t sid $CONTAINER_STACK' \
-        "only the container stack is taken from unstable"
+    install=$(grep -vE '^[[:space:]]*#' "$ROOT/resources/install.sh")
+    assert_not_contains "$install" "sid main" "no unstable source is added"
+    assert_not_contains "$install" "-t sid" "nothing is taken from unstable"
+    assert_not_contains "$install" "Pin: release a=unstable" "and no pin for it is left behind"
+    assert_contains "$install" "grep ',local\\]'" \
+        "the build fails on any package no trixie source provides"
+    assert_contains "$install" "(sid|unstable|testing|forky)" \
+        "and on any apt source outside trixie"
 }
 
 test_kernel_comes_from_backports() {
     local install
     install=$(cat "$ROOT/resources/install.sh")
     assert_contains "$install" "trixie-backports" "install.sh pulls a kernel from backports"
+    # Removing the source after the build froze the kernel at the build's version.
+    assert_not_contains "$(grep -vE '^[[:space:]]*#' "$ROOT/resources/install.sh")" \
+        "rm -f /etc/apt/sources.list.d/backports.list" "backports stays enabled, so the kernel gets updates"
     assert_contains "$install" "apt-get purge" "install.sh purges the superseded kernel"
     assert_contains "$install" 'linux-image-$DEB_ARCH' "the kernel package is architecture independent"
 }
