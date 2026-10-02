@@ -247,6 +247,9 @@ echo "podman-machine" > /etc/containers/podman-machine
 # file itself.
 mkdir -p /usr/share/containers
 install -m 644 "$RESOURCES/configs/storage.conf" /usr/share/containers/storage.conf
+# Rootless users get their own, without root's paths - see storage-user.conf.
+# useradd -m copies /etc/skel, which is how the Ignition provider creates core.
+install -D -m 644 "$RESOURCES/configs/storage-user.conf" /etc/skel/.config/containers/storage.conf
 install -m 644 "$RESOURCES/configs/containers.conf" /usr/share/containers/containers.conf
 echo "✓ Podman configuration installed"
 

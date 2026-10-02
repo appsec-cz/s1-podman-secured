@@ -546,12 +546,23 @@ for f in "$DIR"/containers/*.yaml; do
 done
 
 if [ -s "$DIR/expected.txt" ]; then
-    # Fallback for a podman without --no-pod-prefix, which names it <name>-pod-<name>.
+    # Fallback for a podman without --no-pod-prefix - Debian trixie ships 5.4.2,
+    # which does not have it - and names every container <pod>-<name>. A
+    # standalone container was generated into a pod called <name>-pod, so it
+    # comes back as <name>-pod-<name>; a pod member as <pod>-<name>.
     while read -r c; do
         if podman container exists "${c}-pod-${c}" && ! podman container exists "$c"; then
             podman rename "${c}-pod-${c}" "$c" >/dev/null 2>&1 || echo "RESTORE_FAIL rename $c"
         fi
     done < "$DIR/expected.txt"
+    if [ -s "$DIR/members.txt" ]; then
+        while IFS="$(printf "\t")" read -r pod c; do
+            [ -n "$c" ] || continue
+            if podman container exists "${pod}-${c}" && ! podman container exists "$c"; then
+                podman rename "${pod}-${c}" "$c" >/dev/null 2>&1 || echo "RESTORE_FAIL rename $c"
+            fi
+        done < "$DIR/members.txt"
+    fi
 
     # kube play starts everything it creates; stop again what was not running.
     while read -r c; do
@@ -564,6 +575,13 @@ VERIFY_GUEST_SCRIPT='
 set -u
 fail=0
 now=$(mktemp -d)
+
+# Every list is what was promised. A list that is not there cannot be compared
+# against, and a loop reading a missing file simply runs zero times - which used
+# to report VERIFY_OK for a directory with no backup in it, and get it deleted.
+for f in images.txt volumes.txt expected.txt pods.txt running.txt; do
+    [ -f "$DIR/$f" ] || { echo "MISSING backup file $f"; fail=1; }
+done
 
 podman images --format "{{.Repository}}:{{.Tag}}" | sort -u > "$now/images"
 podman volume ls --format "{{.Name}}" | sort > "$now/volumes"
@@ -632,6 +650,11 @@ restore_machine() {
     local dir="$1"
     if [ ! -d "$dir" ]; then
         echo -e "${RED}Error: no backup at $dir${NC}"
+        exit 1
+    fi
+    # Only a backup this script wrote: the manifest is the last thing written.
+    if [ ! -f "$dir/manifest.json" ]; then
+        echo -e "${RED}Error: $dir has no manifest.json - not a complete backup${NC}"
         exit 1
     fi
     require_machine_running

@@ -157,6 +157,19 @@ else
     logger "post-ignition-setup: /etc/containers/policy.json present (skipping fallback)"
 fi
 
+# Rootless storage configuration
+# The system storage.conf sets root's runroot and graphroot, which podman 5.8
+# would apply to the user as well and point the store somewhere it cannot write.
+# The user's own file prevents that. It normally arrives from /etc/skel when the
+# provider creates the user; this covers a user that was created some other way.
+USER_STORAGE_CONF="$USER_HOME/.config/containers/storage.conf"
+if [ ! -f "$USER_STORAGE_CONF" ] && [ -f /etc/skel/.config/containers/storage.conf ]; then
+    install -D -m 644 -o "$USER_UID" -g "$USER_GID" \
+        /etc/skel/.config/containers/storage.conf "$USER_STORAGE_CONF"
+    chown "$USER_UID:$USER_GID" "$USER_HOME/.config" "$USER_HOME/.config/containers"
+    logger "post-ignition-setup: rootless storage.conf installed from /etc/skel"
+fi
+
 # Apply tmpfiles configuration (in case Ignition created new tmpfiles)
 systemd-tmpfiles --create 2>/dev/null || true
 

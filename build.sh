@@ -73,6 +73,7 @@ REQUIRED_FILES=(
     "$RESOURCES_DIR/services/rosetta-activation.service"
     "$RESOURCES_DIR/configs/containers.conf"
     "$RESOURCES_DIR/configs/storage.conf"
+    "$RESOURCES_DIR/configs/storage-user.conf"
     "$RESOURCES_DIR/configs/99-podman.conf"
     "$RESOURCES_DIR/configs/10-vz-nat.network"
     "$RESOURCES_DIR/configs/delegate.conf"

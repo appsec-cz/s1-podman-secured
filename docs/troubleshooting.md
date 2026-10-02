@@ -313,10 +313,19 @@ level=warning msg="RunRoot is pointing to a path (/run/containers/storage) which
 Error: configure storage: open /var/lib/containers/storage/storage.lock: permission denied
 ```
 
-`storage.conf` pinned `runroot` and `graphroot` to the rootful paths. Podman 5.4
-silently replaced them for rootless users; podman 5.8 honours them. Neither is
-set any more - podman picks the right pair per mode. If you carry a local
-`storage.conf`, remove those two keys.
+A rootless podman read the system `storage.conf`, which sets `runroot` and
+`graphroot` to root's paths. Podman 5.4 replaces them for rootless users; podman
+5.8 honours them. The machine user therefore has its own
+`~/.config/containers/storage.conf` without paths, from `/etc/skel` - check that
+it exists. The system file has to keep the paths: rootful podman 5.4 refuses to
+start without them.
+
+## `Failed to obtain podman configuration: runroot must be set`
+
+Rootful podman, and with it `podman-restart.service` for root, fails at once.
+The system `storage.conf` has no `runroot`/`graphroot`, which podman 5.4 requires
+for root. Images built between taking podman 5.8 from unstable and going back to
+trixie's 5.4 have this; the current `storage.conf` sets both.
 
 ## `prerequisites for driver not satisfied (wrong filesystem?)`
 

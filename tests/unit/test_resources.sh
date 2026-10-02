@@ -97,10 +97,21 @@ test_storage_driver_is_btrfs() {
     assert_not_contains "$conf" 'driver = "btrfs"' \
         "storage.conf does not pin the driver"
 
-    # Pinning these to the rootful paths broke every rootless command on podman
-    # 5.8, which honours them where 5.4 silently substituted the user's own.
-    assert_not_contains "$conf" "graphroot" "storage.conf does not hardcode graphroot"
-    assert_not_contains "$conf" "runroot" "storage.conf does not hardcode runroot"
+    # Root needs the paths: podman 5.4 refuses "runroot must be set" without
+    # them, which left rootful podman and podman-restart.service dead. A rootless
+    # user must never see them - podman 5.8 honours them for the user too - so
+    # users get their own file without paths.
+    local user
+    user=$(grep -vE '^[[:space:]]*#' "$ROOT/resources/configs/storage-user.conf")
+    assert_matches "$conf" '^runroot = "/run/containers/storage"$' "root's runroot is set"
+    assert_matches "$conf" '^graphroot = "/var/lib/containers/storage"$' "root's graphroot is set"
+    assert_not_contains "$user" "graphroot" "the user's storage.conf does not set graphroot"
+    assert_not_contains "$user" "runroot" "the user's storage.conf does not set runroot"
+    assert_contains "$user" 'driver_priority = ["btrfs", "overlay"]' "and keeps the driver priority"
+    assert_contains "$(cat "$ROOT/resources/install.sh")" "/etc/skel/.config/containers/storage.conf" \
+        "every new user gets it"
+    assert_contains "$(cat "$ROOT/resources/scripts/post-ignition-setup.sh")" "USER_STORAGE_CONF" \
+        "and core gets it even when created some other way"
 }
 
 test_configs_survive_podman6_mount() {

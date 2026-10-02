@@ -107,6 +107,31 @@ test_options_without_a_value_are_refused() {
     assert_contains "$out" "--restore needs a value" "--restore without a directory is reported"
 }
 
+test_pod_members_get_their_names_back() {
+    # podman 5.4 has no --no-pod-prefix and names a pod member <pod>-<name>;
+    # the restore only knew the standalone form <name>-pod-<name>.
+    assert_contains "$DEPLOY" 'podman rename "${pod}-${c}" "$c"' \
+        "pod members are renamed back after kube play"
+    assert_contains "$DEPLOY" 'podman rename "${c}-pod-${c}" "$c"' \
+        "and standalone containers still are"
+}
+
+test_verify_refuses_a_backup_without_its_lists() {
+    # A loop over a missing file runs zero times, so an empty directory used to
+    # verify as a complete restore - and then get deleted.
+    local tmp out bin
+    tmp=$(mktemp -d); bin=$(mktemp -d)
+    printf '#!/bin/sh\nexit 0\n' > "$bin/podman"; chmod +x "$bin/podman"
+    out=$( { echo "DIR=$tmp"
+             printf '%s\n' "$DEPLOY" | awk "/^VERIFY_GUEST_SCRIPT='/{f=1;next} f&&/^'\$/{exit} f"
+           } | PATH="$bin:$PATH" bash -s 2>&1)
+    rm -rf "$tmp" "$bin"
+    assert_contains "$out" "VERIFY_FAILED" "an empty backup directory does not verify"
+    assert_contains "$out" "MISSING backup file expected.txt" "and says what is missing"
+    assert_contains "$DEPLOY" 'has no manifest.json - not a complete backup' \
+        "restore refuses a directory without a manifest"
+}
+
 test_kind_nodes_are_left_behind() {
     # A kind node is a running kubelet with etcd behind it; replaying its
     # definition does not give back a working cluster.
