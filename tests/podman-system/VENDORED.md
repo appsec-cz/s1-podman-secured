@@ -60,21 +60,20 @@ the suite is thorough and the machine is created from scratch.
 
 ## Baseline: what this suite does on this image
 
-The image is back on trixie's podman 5.4.2 and the suite on v5.4.2. A baseline
-for that combination has not been recorded yet; the breakdown below is from
-podman 5.8.4 and stays as the reference until it is.
-
-Full run against the image built on 2026-08-24 - kernel 7.1.8 from backports,
-podman 5.8.4 from unstable - rootless, in a throwaway machine:
+Full run against the image built on 2026-10-02 - kernel 7.1.13 and passt from
+trixie-backports, podman 5.4.2 from trixie, suite at v5.4.2 - rootless, in a
+throwaway machine:
 
 ```
-630 passed, 34 failed, 82 skipped   (about 50 minutes)
+583 ok (79 of them skipped), 34 failed, 617 tests   (about 25 minutes)
 ```
 
-For comparison, the same image with Debian stable's podman 5.4.2 scored
-584 passed, 33 failed, 79 skipped: the newer podman brings a larger suite and
-passes 46 more tests, with the same failures plus `[200] podman pod create -
-hashtag AllTheOptions`, which comes and goes between runs.
+That matches the last run on trixie's podman before the image went to unstable
+for a while: 584 ok, 33 failed, 79 skipped. The one difference this time is
+`[070] podman build - URLs`, which fetches a file from github.com and got an HTTP
+503 - an outage on the far side, not the image. The run on podman 5.8.4 from
+unstable (2026-08-24) had a larger suite, 630 passed and 34 failed, with the same
+failures apart from those noted below.
 
 Podman's own banner confirms what it is testing:
 
@@ -97,12 +96,11 @@ this. Not fixable from here, and nothing is actually broken - our own
 `integration/test_runtime_behaviour.sh` checks that a published port does reach
 macOS.
 
-**5 - the storage driver and its neighbourhood.** `005-info` (3), `010-images` (1),
-`550-pause-process` (1). Pinning `driver = "btrfs"` used to make every podman
+**3 - the storage driver and its neighbourhood.** `005-info` (2), `010-images` (1). Pinning `driver = "btrfs"` used to make every podman
 invocation whose store is not on btrfs fail outright - and `/tmp` is tmpfs, so
 anything using `--root` there died. `storage.conf` now sets
 `driver_priority = ["btrfs", "overlay"]` instead, which fixed three of them.
-`[005] podman info - json` appeared with podman 5.8.4 and has not been looked at.
+`[005] podman info - json` failed on podman 5.8.4 only.
 
 The two that remain are not ours to fix: `[005] empty string defaults` sets its
 own storage.conf and then cannot use any driver on tmpfs, and `[010] additional
@@ -113,8 +111,9 @@ store` fails in an upstream helper that only knows overlay and vfs
 rejoining userns`: *failed to delete container veth eth0: Netlink error: No such
 device*. Seen once, in teardown. Worth watching rather than chasing.
 
-**5 - not characterised yet.** `252-quadlet` (2), `600-completion` (2), and
-`[200] podman pod create - hashtag AllTheOptions`. The pod one fails on
+**3 - not characterised yet.** `600-completion` (2) and
+`[200] podman pod create - hashtag AllTheOptions`. `252-quadlet` (2) failed on
+podman 5.8.4 and passes on 5.4.2. The pod one fails on
 *"cannot set hostname when joining the pod UTS namespace"*, which reads like a
 podman version and test expectation mismatch rather than a configuration
 problem.
