@@ -25,6 +25,13 @@ STATE="/run/podman-machine-health.last"
 # A line every beat would grow the host's log forever, so an unchanged machine
 # only says so occasionally.
 HEARTBEAT_SECONDS="${HEALTH_HEARTBEAT_SECONDS:-1800}"
+# A podman that hangs is the failure worth reporting, so it must not also hang
+# the report: the timer starts no new run while this one is still active.
+PODMAN_TIMEOUT="${HEALTH_PODMAN_TIMEOUT:-20}"
+
+as_user_podman() {
+    timeout "$PODMAN_TIMEOUT" runuser -u "$MACHINE_USER" -- podman "$@"
+}
 
 field() { printf '%s=%s ' "$1" "$2"; }
 
@@ -42,8 +49,12 @@ collect() {
 
     # The runtime, not just the daemon: a podman that cannot list containers is
     # as broken as one that is not running.
-    local containers
-    if containers=$(runuser -u "$MACHINE_USER" -- podman ps -q 2>/dev/null | wc -l | tr -d ' '); then
+    #
+    # podman's own exit status decides, which is why it is not in a pipeline:
+    # without pipefail that status was wc's, and "unresponsive" never appeared.
+    local ids containers
+    if ids=$(as_user_podman ps -q 2>/dev/null); then
+        containers=$(printf '%s' "$ids" | grep -c .)
         out+=$(field podman "ok/${containers}running")
     else
         out+=$(field podman unresponsive)
@@ -51,7 +62,7 @@ collect() {
     fi
 
     local driver
-    driver=$(runuser -u "$MACHINE_USER" -- podman info --format '{{.Store.GraphDriverName}}' 2>/dev/null)
+    driver=$(as_user_podman info --format '{{.Store.GraphDriverName}}' 2>/dev/null)
     case "$driver" in
         btrfs) out+=$(field storage btrfs) ;;
         "")    out+=$(field storage unknown); faults=$((faults + 1)) ;;

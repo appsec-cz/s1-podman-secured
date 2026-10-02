@@ -351,6 +351,53 @@ class TestIgnitionProvider(unittest.TestCase):
         self.assertTrue(os.path.exists(other_file))
 
 
+class FakeSocket:
+    """A socket that hands out its data in the given pieces, then b'' for ever."""
+
+    def __init__(self, *pieces):
+        self.buffer = b"".join(pieces)
+        self.reads = 0
+
+    def recv(self, n):
+        self.reads += 1
+        if self.reads > 100000:
+            raise AssertionError("still reading from a closed connection")
+        data, self.buffer = self.buffer[:n], self.buffer[n:]
+        return data
+
+
+class TestChunkedBody(unittest.TestCase):
+    """The chunked reader once spun for ever on a host that closed mid-chunk."""
+
+    read = staticmethod(ignition_provider.read_chunked_body)
+
+    def test_reads_chunks(self):
+        sock = FakeSocket(b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n")
+        self.assertEqual(self.read(sock), b"hello world")
+
+    def test_tolerates_extensions_and_trailers(self):
+        sock = FakeSocket(b"5;name=v\r\nhello\r\n0\r\nX-Trailer: 1\r\n\r\n")
+        self.assertEqual(self.read(sock), b"hello")
+
+    def test_large_chunk_across_many_reads(self):
+        payload = b"x" * 10000
+        sock = FakeSocket(b"%x\r\n" % len(payload), payload, b"\r\n0\r\n\r\n")
+        self.assertEqual(self.read(sock), payload)
+
+    def test_close_inside_a_chunk_is_an_error_not_a_hang(self):
+        sock = FakeSocket(b"a\r\nhel")
+        with self.assertRaises(ConnectionError):
+            self.read(sock)
+
+    def test_close_inside_a_size_line(self):
+        with self.assertRaises(ConnectionError):
+            self.read(FakeSocket(b"5"))
+
+    def test_missing_crlf_after_chunk(self):
+        with self.assertRaises(ValueError):
+            self.read(FakeSocket(b"5\r\nhelloXX0\r\n\r\n"))
+
+
 class TestMountTargetValidation(unittest.TestCase):
     """
     A virtiofs share mounted over a system directory hides everything the image

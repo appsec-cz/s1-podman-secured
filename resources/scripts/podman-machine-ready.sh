@@ -73,7 +73,10 @@ send_ready() {
     return 1
 }
 
-send_ready
+# A failed signal has to fail the unit: podman-machine-ready.service retries on
+# failure, and an exit status of 0 here used to turn that retry off - the script
+# carried on to the diagnostics and ended on a successful logger call.
+send_ready || exit 1
 
 # Past the critical path: the host is no longer waiting on us.
 if [ -x /usr/local/bin/podman-machine-diagnostics ]; then

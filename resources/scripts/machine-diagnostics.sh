@@ -29,7 +29,7 @@ printf 'boot %s, up %s\n' \
 # ---------------------------------------------------------------------------
 section "identity and kernel"
 info "kernel:  $(uname -r 2>/dev/null)"
-info "podman:  $(runuser -u "$MACHINE_USER" -- podman --version 2>/dev/null)"
+info "podman:  $(timeout 20 runuser -u "$MACHINE_USER" -- podman --version 2>/dev/null)"
 info "host:    $(hostname 2>/dev/null)"
 
 # Shipping a machine-id in the image gives every deployment the same one, which
@@ -124,8 +124,8 @@ done
 # gvproxy to forward a port, so "podman run -p" works inside and is unreachable
 # from macOS.
 section "storage and port forwarding"
-driver=$(runuser -u "$MACHINE_USER" -- podman info --format '{{.Store.GraphDriverName}}' 2>/dev/null)
-root=$(runuser -u "$MACHINE_USER" -- podman info --format '{{.Store.GraphRoot}}' 2>/dev/null)
+driver=$(timeout 20 runuser -u "$MACHINE_USER" -- podman info --format '{{.Store.GraphDriverName}}' 2>/dev/null)
+root=$(timeout 20 runuser -u "$MACHINE_USER" -- podman info --format '{{.Store.GraphRoot}}' 2>/dev/null)
 case "$driver" in
     btrfs) ok "storage driver is btrfs ($root)" ;;
     "")    bad "podman could not report a storage driver" ;;

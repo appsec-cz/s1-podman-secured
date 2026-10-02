@@ -159,6 +159,52 @@ def mount_unit_target(contents: Optional[str]) -> Optional[str]:
     return normalised if normalised == '/' else normalised.rstrip('/')
 
 
+def _recv_exactly(sock, n: int) -> bytes:
+    """Read exactly n bytes; a peer that closes early is an error, not a hang."""
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(min(4096, n - len(data)))
+        if not chunk:
+            raise ConnectionError(f"connection closed after {len(data)} of {n} bytes")
+        data += chunk
+    return data
+
+
+def _recv_line(sock) -> bytes:
+    line = b""
+    while not line.endswith(b"\r\n"):
+        byte = sock.recv(1)
+        if not byte:
+            raise ConnectionError("connection closed inside a chunked body")
+        line += byte
+    return line
+
+
+def read_chunked_body(sock) -> bytes:
+    """
+    Read an HTTP/1.1 chunked body.
+
+    recv() returns b"" once the peer has closed, immediately and for ever, so
+    the socket timeout never fires. The loop this replaces appended that to the
+    chunk and asked again, and a host that went away mid-chunk held the boot
+    for good. recv(2) for the CRLFs could also come back short and leave the
+    next size line misaligned.
+    """
+    body = b""
+    while True:
+        # Chunk extensions (";name=value") are allowed after the size.
+        size_field = _recv_line(sock).split(b";", 1)[0].strip()
+        chunk_size = int(size_field, 16)
+        if chunk_size == 0:
+            # Trailer headers, if any, up to the empty line that ends the body.
+            while _recv_line(sock) != b"\r\n":
+                pass
+            return body
+        body += _recv_exactly(sock, chunk_size)
+        if _recv_exactly(sock, 2) != b"\r\n":
+            raise ValueError("chunk not followed by CRLF")
+
+
 class IgnitionProvider:
     """Fetches and applies Ignition configuration from vsock."""
 
@@ -250,31 +296,7 @@ class IgnitionProvider:
             elif transfer_encoding == 'chunked':
                 # Read chunked transfer encoding
                 logger.info("Reading chunked body...")
-                body_bytes = b""
-                while True:
-                    # Read chunk size line
-                    size_line = b""
-                    while not size_line.endswith(b"\r\n"):
-                        byte = sock.recv(1)
-                        if not byte:
-                            break
-                        size_line += byte
-
-                    chunk_size = int(size_line.strip(), 16)
-                    if chunk_size == 0:
-                        # Read trailing CRLF
-                        sock.recv(2)
-                        break
-
-                    # Read chunk data
-                    chunk_data = b""
-                    while len(chunk_data) < chunk_size:
-                        remaining = chunk_size - len(chunk_data)
-                        chunk_data += sock.recv(min(4096, remaining))
-                    body_bytes += chunk_data
-
-                    # Read trailing CRLF after chunk
-                    sock.recv(2)
+                body_bytes = read_chunked_body(sock)
 
                 logger.info(f"Received chunked body: {len(body_bytes)} bytes")
             else:

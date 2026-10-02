@@ -39,6 +39,11 @@ BACKUP_ROOT="$HOME/.local/share/containers/podman/machine/backups"
 BACKUP_SITE_KEY=""
 RESTORE_STATUS=0
 S1_STATUS=0
+# "sudo " when the data lives in root's store. A rootful machine's containers
+# are root's, and a backup taken as the machine user would find none of them.
+GUEST_SUDO=""
+# Whether the machine being replaced was rootful, so its successor is too.
+BACKUP_ROOTFUL=false
 # True while the old machine's data exists only in the backup: from the moment
 # the backup is taken until the restore has had its say.
 BACKUP_PENDING=false
@@ -189,7 +194,20 @@ guest_script() {
     {
         for kv in "$@"; do printf '%s\n' "$kv"; done
         printf '%s\n' "$script"
-    } | podman machine ssh "$MACHINE_NAME" 'bash -s'
+    } | podman machine ssh "$MACHINE_NAME" "${GUEST_SUDO}bash -s"
+}
+
+machine_is_rootful() {
+    [ "$(podman machine inspect "$MACHINE_NAME" --format '{{.Rootful}}' 2>/dev/null)" = "true" ]
+}
+
+# Point the guest scripts at the store the backup belongs to.
+use_store() {
+    if [ "$1" = "true" ]; then
+        GUEST_SUDO="sudo "
+    else
+        GUEST_SUDO=""
+    fi
 }
 
 machine_is_running() {
@@ -352,11 +370,24 @@ backup_machine() {
     BACKUP_DIR="$BACKUP_ROOT/${MACHINE_NAME}-$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$BACKUP_DIR"
 
+    # A rootful machine keeps its containers in root's store; backing up the
+    # machine user's would succeed, find nothing, and let the machine go.
+    local store="~/.local/share/containers"
+    if machine_is_rootful; then
+        BACKUP_ROOTFUL=true
+        store="/var/lib/containers"
+        echo -e "${BLUE}  Rootful machine - backing up root's containers${NC}"
+    else
+        BACKUP_ROOTFUL=false
+    fi
+    use_store "$BACKUP_ROOTFUL"
+    echo "$BACKUP_ROOTFUL" > "$BACKUP_DIR/rootful.txt"
+
     # The export needs roughly what the store occupies. Finding that out after
     # writing half of it is no use to anybody.
     local need_kb free_kb
     need_kb=$(podman machine ssh "$MACHINE_NAME" \
-        "du -sk ~/.local/share/containers 2>/dev/null | cut -f1" 2>/dev/null | tr -d '\r')
+        "${GUEST_SUDO}du -sk $store 2>/dev/null | cut -f1" 2>/dev/null | tr -d '\r')
     free_kb=$(df -k "$BACKUP_ROOT" | awk 'NR==2 {print $4}')
     if [ -n "$need_kb" ] && [ -n "$free_kb" ] && [ "$need_kb" -gt "$free_kb" ]; then
         echo -e "${RED}Error: the store is $((need_kb / 1024)) MB and only $((free_kb / 1024)) MB is free${NC}"
@@ -437,6 +468,7 @@ manifest = {
     "skipped": read("skipped.txt"),
     "ungenerated": read("ungenerated.txt") + ["pod " + p for p in read("ungenerated-pods.txt")],
     "sentinelone_site_key": site_key,
+    "rootful": (read("rootful.txt") or ["false"])[0] == "true",
 }
 with open(os.path.join(d, "manifest.json"), "w") as fh:
     json.dump(manifest, fh, indent=2)
@@ -583,10 +615,23 @@ restore_machine() {
     fi
     require_machine_running
 
+    # Back into the store it came from. A backup older than this file came from
+    # the machine user's store, which is all that was ever backed up then.
+    local rootful
+    rootful=$(cat "$dir/rootful.txt" 2>/dev/null || echo false)
+    use_store "$rootful"
+    if [ "$rootful" = "true" ]; then
+        echo -e "${BLUE}  Backup is of a rootful machine - restoring into root's store${NC}"
+        if ! machine_is_rootful; then
+            echo -e "${YELLOW}  This machine is not rootful, so the client will not see them:${NC}"
+            echo "    podman machine stop $MACHINE_NAME && podman machine set --rootful $MACHINE_NAME"
+        fi
+    fi
+
     # An archive written by a newer podman may simply not load into an older one.
     local was now
     was=$(cat "$dir/guest-podman-version.txt" 2>/dev/null | tr -d '\r')
-    now=$(podman machine ssh "$MACHINE_NAME" "podman --version" 2>/dev/null | tr -d '\r')
+    now=$(podman machine ssh "$MACHINE_NAME" "${GUEST_SUDO}podman --version" 2>/dev/null | tr -d '\r')
     if [ -n "$was" ] && [ -n "$now" ] && [ "$was" != "$now" ]; then
         echo -e "${YELLOW}  Backup came from '$was', restoring into '$now'${NC}"
     fi
@@ -684,11 +729,19 @@ create_machine() {
 
     echo -e "${BLUE}Creating machine '$MACHINE_NAME'...${NC}"
     enable_rosetta
+    # The replacement keeps the old machine's mode: a rootful machine's data is
+    # restored into root's store, and a rootless successor would hide all of it.
+    local init_args=()
+    if [ "$BACKUP_ROOTFUL" = "true" ]; then
+        init_args+=(--rootful)
+        echo -e "${BLUE}  Rootful, as the machine it replaces${NC}"
+    fi
     podman machine init "$MACHINE_NAME" \
         --image "$IMAGE_PATH" \
         --cpus "$CPUS" \
         --memory "$MEMORY" \
-        --disk-size "$DISK_SIZE"
+        --disk-size "$DISK_SIZE" \
+        "${init_args[@]}"
 
     echo -e "${BLUE}Starting machine...${NC}"
     podman machine start "$MACHINE_NAME"
@@ -750,7 +803,11 @@ deploy_sentinelone() {
     # Register if token provided
     if [ -n "$S1_TOKEN" ]; then
         echo "  Registering agent..."
-        podman machine ssh "$MACHINE_NAME" "sudo /opt/sentinelone/bin/sentinelctl management token set \"$S1_TOKEN\"" >/dev/null 2>&1 || \
+        # Over stdin, not in the command: anything in the ssh command line is in
+        # every "ps" on the Mac for as long as the call runs. sentinelctl itself
+        # only takes it as an argument, so inside the guest it cannot be hidden.
+        printf '%s' "$S1_TOKEN" | podman machine ssh "$MACHINE_NAME" \
+            'sudo /opt/sentinelone/bin/sentinelctl management token set "$(cat)"' >/dev/null 2>&1 || \
             echo -e "${YELLOW}  Token could not be set - register manually with sentinelctl${NC}"
     fi
 
@@ -777,9 +834,7 @@ prompt_for_token() {
     [ -z "$S1_PACKAGE" ] && return
     [ -n "$S1_TOKEN" ] && return
 
-    # Check if running interactively
-    if [ -t 0 ]; then
-        INTERACTIVE=true
+    if [ "$INTERACTIVE" = "true" ]; then
         echo ""
         echo "SentinelOne token (from console: Settings > Sites > Site Token)"
         read -p "Enter token (or Enter to skip): " S1_TOKEN
@@ -897,6 +952,13 @@ main() {
             exit $?
             ;;
     esac
+
+    # Decided once, from the terminal. It used to be set only as a side effect of
+    # asking for the agent token, so with --token or without an agent package
+    # the offer to remove old machines never came.
+    if [ -t 0 ]; then
+        INTERACTIVE=true
+    fi
 
     check_prerequisites
     prompt_for_token

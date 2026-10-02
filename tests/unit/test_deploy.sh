@@ -34,6 +34,64 @@ test_backup_never_writes_the_token() {
         "the manifest has no token field"
 }
 
+test_token_never_on_a_command_line() {
+    # Anything in the ssh command line is in every "ps" on the Mac while it runs.
+    assert_not_contains "$DEPLOY" 'token set \"$S1_TOKEN\"' \
+        "the token is not interpolated into the ssh command"
+    assert_contains "$DEPLOY" "printf '%s' \"\$S1_TOKEN\" | podman machine ssh" \
+        "the token goes over stdin"
+}
+
+# The backup script as the guest runs it, against a podman stand-in. The machine
+# is only replaced on BACKUP_OK, so this is the line that decides whether
+# "podman machine rm" may take the only copy of someone's data.
+run_backup_script() {
+    local stub="$1" dir="$2" bin
+    bin=$(mktemp -d)
+    printf '%s\n' '#!/bin/bash' "$stub" > "$bin/podman"
+    chmod +x "$bin/podman"
+    { echo "DIR=$dir"
+      printf '%s\n' "$DEPLOY" | awk "/^BACKUP_GUEST_SCRIPT='/{f=1;next} f&&/^'\$/{exit} f"
+    } | PATH="$bin:$PATH" bash -s 2>&1
+    rm -rf "$bin"
+}
+
+test_backup_is_complete_only_when_it_says_so() {
+    local tmp out
+    tmp=$(mktemp -d)
+
+    out=$(run_backup_script 'case "$1" in images) echo "docker.io/library/alpine:latest";; esac; exit 0' "$tmp/ok")
+    assert_contains "$out" "BACKUP_OK" "a backup that ran to the end says BACKUP_OK"
+    assert_not_contains "$out" "BACKUP_FAIL" "and reports no failure"
+
+    out=$(run_backup_script '[ "$1" = info ] && exit 125; exit 0' "$tmp/dead")
+    assert_contains "$out" "BACKUP_FAIL" "a podman that does not answer fails the backup"
+    assert_not_contains "$out" "BACKUP_OK" "and it never claims to be complete"
+
+    out=$(run_backup_script '[ "$1" = volume ] && exit 1; exit 0' "$tmp/partial")
+    assert_contains "$out" "BACKUP_FAIL list volumes" "a listing that fails is reported"
+    rm -rf "$tmp"
+
+    assert_contains "$DEPLOY" 'grep -qx "BACKUP_OK"' "the host requires BACKUP_OK"
+    assert_contains "$DEPLOY" '|| rc=$?' "and checks the script's exit status"
+}
+
+test_rootful_machines_back_up_roots_store() {
+    # Backing up the machine user's store on a rootful machine succeeds, finds
+    # nothing, and lets the machine - with all of root's containers - go.
+    assert_contains "$DEPLOY" "{{.Rootful}}" "deploy.sh asks whether the machine is rootful"
+    assert_contains "$DEPLOY" '"${GUEST_SUDO}bash -s"' "the guest scripts can run as root"
+    assert_contains "$DEPLOY" 'rootful.txt' "the backup records which store it came from"
+    assert_contains "$DEPLOY" "init_args+=(--rootful)" "a rootful machine is replaced by a rootful one"
+}
+
+test_interactivity_comes_from_the_terminal() {
+    # It was set only while asking for the token, so the offer to remove old
+    # machines never appeared with --token or without an agent package.
+    assert_matches "$(printf '%s\n' "$DEPLOY" | awk '/^main\(\)/,/^}/')" 'if \[ -t 0 \]; then' \
+        "main decides interactivity from the terminal"
+}
+
 test_kind_nodes_are_left_behind() {
     # A kind node is a running kubelet with etcd behind it; replaying its
     # definition does not give back a working cluster.

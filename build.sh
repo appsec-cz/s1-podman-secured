@@ -104,40 +104,74 @@ CHECKSUM_URL="https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUMS"
 BASE_IMAGE="$CACHE_DIR/debian-13-${DEBIAN_ARCH}.qcow2"
 CHECKSUM_FILE="$CACHE_DIR/debian-13-${DEBIAN_ARCH}.sha512"
 
-# Download Debian cloud image if not cached
+# The base image is everything the machine runs on, so it is never used without
+# matching Debian's published checksum - not when SHA512SUMS cannot be fetched,
+# not when it has no line for this image, and not when it comes from the cache.
+# The checksum is kept next to the cached image for exactly that: "latest" moves,
+# so a cached image can only be checked against the list it was downloaded with.
+IMAGE_FILE_NAME="debian-13-generic-${DEBIAN_ARCH}.qcow2"
+
+expected_checksum() {
+    awk -v f="$IMAGE_FILE_NAME" '$2 == f || $2 == "*" f {print $1; exit}' "$CHECKSUM_FILE" 2>/dev/null
+}
+
+verify_base_image() {
+    local image="$1" expected actual
+    expected=$(expected_checksum)
+    if [ -z "$expected" ]; then
+        echo "ERROR: $CHECKSUM_FILE has no checksum for $IMAGE_FILE_NAME"
+        return 1
+    fi
+    actual=$(sha512sum "$image" | awk '{print $1}')
+    if [ "$expected" != "$actual" ]; then
+        echo "ERROR: checksum verification FAILED for $image"
+        echo "  expected $expected"
+        echo "  actual   $actual"
+        return 1
+    fi
+    echo "✓ Checksum verification passed"
+}
+
 if [ ! -f "$BASE_IMAGE" ]; then
     echo "Downloading Debian cloud image..."
     echo "URL: $DEBIAN_URL"
 
-    if ! curl -L -o "$BASE_IMAGE" \
+    # Into a .part file, so an interrupted download is never mistaken for a
+    # cached image on the next run.
+    if ! curl -L -o "$BASE_IMAGE.part" \
         --fail --connect-timeout 30 --max-time 600 \
         --retry 3 --retry-delay 5 --progress-bar \
         "$DEBIAN_URL"; then
         echo "ERROR: Failed to download Debian image"
-        rm -f "$BASE_IMAGE"
+        rm -f "$BASE_IMAGE.part"
         exit 1
     fi
 
-    echo "Download complete!"
-
-    # Checksum verification
     echo "Downloading checksum..."
-    if curl -L -o "$CHECKSUM_FILE" --fail --connect-timeout 30 --max-time 30 "$CHECKSUM_URL"; then
-        echo "Verifying checksum..."
-        EXPECTED_CHECKSUM=$(grep "debian-13-generic-${DEBIAN_ARCH}.qcow2" "$CHECKSUM_FILE" | awk '{print $1}')
-        if [ -n "$EXPECTED_CHECKSUM" ]; then
-            ACTUAL_CHECKSUM=$(sha512sum "$BASE_IMAGE" | awk '{print $1}')
-            if [ "$EXPECTED_CHECKSUM" = "$ACTUAL_CHECKSUM" ]; then
-                echo "✓ Checksum verification passed"
-            else
-                echo "ERROR: Checksum verification FAILED"
-                rm -f "$BASE_IMAGE" "$CHECKSUM_FILE"
-                exit 1
-            fi
-        fi
+    if ! curl -L -o "$CHECKSUM_FILE" --fail --connect-timeout 30 --max-time 30 \
+        --retry 3 --retry-delay 5 "$CHECKSUM_URL"; then
+        echo "ERROR: could not download $CHECKSUM_URL - refusing an unverified base image"
+        rm -f "$BASE_IMAGE.part" "$CHECKSUM_FILE"
+        exit 1
     fi
+
+    if ! verify_base_image "$BASE_IMAGE.part"; then
+        rm -f "$BASE_IMAGE.part" "$CHECKSUM_FILE"
+        exit 1
+    fi
+    mv "$BASE_IMAGE.part" "$BASE_IMAGE"
 else
     echo "Using cached image: $BASE_IMAGE"
+    if [ ! -f "$CHECKSUM_FILE" ]; then
+        echo "ERROR: no checksum cached next to it ($CHECKSUM_FILE)"
+        echo "  It cannot be verified. Delete it so it is downloaded again:"
+        echo "    rm -f $BASE_IMAGE"
+        exit 1
+    fi
+    if ! verify_base_image "$BASE_IMAGE"; then
+        echo "  Delete it so it is downloaded again: rm -f $BASE_IMAGE $CHECKSUM_FILE"
+        exit 1
+    fi
 fi
 
 # Create working copy
@@ -372,8 +406,12 @@ if [ "$INSTALL_SENTINELONE" = "1" ]; then
         VIRT_CUSTOMIZE_ARGS+=(--upload "$S1_DEB:/tmp/s1.deb")
         if [ -n "$SENTINELONE_TOKEN" ]; then
             echo "SentinelOne registration token provided"
-            echo -n "$SENTINELONE_TOKEN" > "$CACHE_DIR/sentinelone-token"
-            VIRT_CUSTOMIZE_ARGS+=(--upload "$CACHE_DIR/sentinelone-token:/tmp/sentinelone-token")
+            # A registration secret: readable by nobody else while it exists, and
+            # gone as soon as virt-customize has copied it, however the build ends.
+            TOKEN_FILE=$(umask 077 && mktemp "$CACHE_DIR/sentinelone-token.XXXXXX")
+            trap 'rm -f "$TOKEN_FILE"' EXIT
+            printf '%s' "$SENTINELONE_TOKEN" > "$TOKEN_FILE"
+            VIRT_CUSTOMIZE_ARGS+=(--upload "$TOKEN_FILE:/tmp/sentinelone-token")
         fi
     else
         # The agent is the reason this image exists. Silently building without it
@@ -392,6 +430,9 @@ VIRT_CUSTOMIZE_ARGS+=(
 )
 
 virt-customize "${VIRT_CUSTOMIZE_ARGS[@]}"
+[ -n "${TOKEN_FILE:-}" ] && rm -f "$TOKEN_FILE"
+# Left behind by builds before the token went into a private temporary file.
+rm -f "$CACHE_DIR/sentinelone-token"
 
 # install.sh replaces the kernel, which regenerates grub.cfg. Check it again.
 verify_boot_config "after customization"

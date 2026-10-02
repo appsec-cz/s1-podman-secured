@@ -191,7 +191,7 @@ test_diagnostics_are_off_the_critical_path() {
     local ready before_signal
     ready=$(cat "$ROOT/resources/scripts/podman-machine-ready.sh")
     assert_contains "$ready" "podman-machine-diagnostics" "the ready reporter runs the diagnostics"
-    before_signal=$(printf '%s' "$ready" | sed -n '1,/^send_ready$/p')
+    before_signal=$(printf '%s' "$ready" | sed -nE '1,/^send_ready( |$)/p')
     assert_not_contains "$before_signal" "/usr/local/bin/podman-machine-diagnostics" \
         "but only after the ready signal has gone out"
     assert_contains "$ready" "/run/podman-machine-ready-signal" \
@@ -450,6 +450,67 @@ test_restart_always_survives_a_machine_restart() {
         "podman-restart is enabled for rootless containers"
     assert_matches "$install" '^systemctl enable podman-restart\.service$' \
         "and for rootful ones"
+}
+
+test_base_image_is_never_used_unverified() {
+    # An unreachable SHA512SUMS, or one without a line for the image, used to
+    # mean "skip the check". The cached image was never checked at all.
+    local build tmp out
+    build=$(cat "$ROOT/build.sh")
+    assert_contains "$build" "refusing an unverified base image" \
+        "a missing SHA512SUMS stops the build"
+    assert_contains "$build" 'verify_base_image "$BASE_IMAGE"' "the cached image is verified too"
+    assert_contains "$build" '"$BASE_IMAGE.part"' "a download only becomes the cache once verified"
+
+    # The functions themselves, against a real file and a real checksum list.
+    tmp=$(mktemp -d)
+    printf 'image bytes' > "$tmp/img"
+    out=$( (
+        set +e
+        eval "$(awk '/^expected_checksum\(\) \{/,/^}/' "$ROOT/build.sh")"
+        eval "$(awk '/^verify_base_image\(\) \{/,/^}/' "$ROOT/build.sh")"
+        IMAGE_FILE_NAME=debian-13-generic-arm64.qcow2
+        CHECKSUM_FILE="$tmp/sums"
+        sum=$(sha512sum "$tmp/img" | awk '{print $1}')
+        printf '%s  debian-13-generic-arm64.qcow2.json\n%s  debian-13-generic-arm64.qcow2\n' 0000 "$sum" > "$CHECKSUM_FILE"
+        verify_base_image "$tmp/img" >/dev/null && echo match-ok
+        printf '%s  debian-13-generic-arm64.qcow2\n' 0000 > "$CHECKSUM_FILE"
+        verify_base_image "$tmp/img" >/dev/null || echo mismatch-refused
+        printf '%s  debian-13-generic-amd64.qcow2\n' "$sum" > "$CHECKSUM_FILE"
+        verify_base_image "$tmp/img" >/dev/null || echo missing-line-refused
+    ) 2>&1)
+    rm -rf "$tmp"
+    assert_contains "$out" "match-ok" "a matching checksum passes"
+    assert_contains "$out" "mismatch-refused" "a different checksum is refused"
+    assert_contains "$out" "missing-line-refused" "no line for the image is refused, not skipped"
+}
+
+test_agent_token_does_not_linger_in_the_cache() {
+    local build
+    build=$(cat "$ROOT/build.sh")
+    assert_not_contains "$build" '> "$CACHE_DIR/sentinelone-token"' \
+        "the token is not written to a fixed file in the cache"
+    assert_contains "$build" 'umask 077 && mktemp' "it goes into a private temporary file"
+    assert_contains "$build" "trap 'rm -f \"\$TOKEN_FILE\"' EXIT" "which is removed however the build ends"
+}
+
+test_ready_signal_failure_fails_the_unit() {
+    # Restart=on-failure only retries what fails; the script used to end on a
+    # successful logger call whatever happened to the signal.
+    assert_contains "$(cat "$ROOT/resources/scripts/podman-machine-ready.sh")" "send_ready || exit 1" \
+        "a ready signal that never went out fails the unit"
+    assert_contains "$(cat "$ROOT/resources/services/podman-machine-ready.service")" "Restart=on-failure" \
+        "and the unit retries it"
+}
+
+test_health_detects_a_dead_podman() {
+    # Without pipefail the status was wc's, so "unresponsive" never appeared,
+    # and a hung podman hung the timer with it.
+    local health
+    health=$(grep -vE '^[[:space:]]*#' "$ROOT/resources/scripts/machine-health.sh")
+    assert_not_contains "$health" "podman ps -q 2>/dev/null | wc" \
+        "podman's exit status is not lost in a pipeline"
+    assert_contains "$health" 'timeout "$PODMAN_TIMEOUT"' "podman calls are bounded"
 }
 
 test_documentation_links_resolve() {
