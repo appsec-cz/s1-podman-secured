@@ -83,6 +83,25 @@ collect() {
         out+=$(field journal unknown)
     fi
 
+    # sshd is how everything on the Mac reaches this machine, and when it turns
+    # a client away the client exits 255 without a word. Connections sshd has
+    # dropped this boot are counted rather than treated as a fault: the count
+    # changes the line, so every new drop leaves a trace on the host, and a
+    # burst that is long over does not keep the machine marked as broken.
+    local ssh_drops
+    if systemctl is-active --quiet ssh.service; then
+        ssh_drops=$(journalctl -b -q -u ssh.service --no-pager 2>/dev/null \
+            | grep -cE 'drop connection .*(penalty|Maxstartups)')
+        if [ "${ssh_drops:-0}" -eq 0 ]; then
+            out+=$(field ssh ok)
+        else
+            out+=$(field ssh "ok/${ssh_drops}dropped")
+        fi
+    else
+        out+=$(field ssh down)
+        faults=$((faults + 1))
+    fi
+
     out+=$(field up "$(cut -d. -f1 /proc/uptime 2>/dev/null)s")
 
     if [ "$faults" -eq 0 ]; then

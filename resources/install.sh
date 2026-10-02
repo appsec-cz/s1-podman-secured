@@ -264,6 +264,9 @@ install -m 644 "$RESOURCES/configs/podman-machine.conf" /etc/ssh/sshd_config.d/p
 # ssh-keygen -A only creates what is missing.
 mkdir -p /etc/systemd/system/ssh.service.d
 install -m 644 "$RESOURCES/configs/ssh-hostkeys.conf" /etc/systemd/system/ssh.service.d/10-hostkeys.conf
+# sshd must not answer before logins are permitted - see the drop-in.
+install -m 644 "$RESOURCES/configs/ssh-after-user-sessions.conf" \
+    /etc/systemd/system/ssh.service.d/20-after-user-sessions.conf
 
 # Disable systemd-ssh-generator (Debian 13 creates vsock/unix sockets, we need TCP)
 mkdir -p /etc/systemd/system-generators
@@ -274,6 +277,11 @@ ln -sf /dev/null /etc/systemd/system-generators/systemd-ssh-generator
 # the machine itself, see the ssh.service drop-in below.
 systemctl enable ssh.service
 echo "✓ SSH configuration installed"
+
+# Time: the clock has to recover from the Mac sleeping, see the drop-in.
+mkdir -p /etc/chrony/conf.d
+install -m 644 "$RESOURCES/configs/chrony-podman-machine.conf" /etc/chrony/conf.d/podman-machine.conf
+echo "✓ chrony configured to step the clock after a host sleep"
 
 # User delegation for rootless containers
 mkdir -p /etc/systemd/system/user@.service.d/

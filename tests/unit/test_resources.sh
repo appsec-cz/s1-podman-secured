@@ -401,6 +401,46 @@ test_image_carries_no_machine_identity() {
     assert_contains "$install" "10-hostkeys.conf" "install.sh installs the drop-in"
 }
 
+test_sshd_does_not_lock_out_the_host() {
+    # Every host client arrives from gvproxy's one address. sshd listening before
+    # logins were permitted earned that address a penalty at boot, and
+    # MaxStartups dropped parallel calls: "podman machine ssh" exited 255, silent.
+    local install order conf
+    install=$(cat "$ROOT/resources/install.sh")
+    order="$ROOT/resources/configs/ssh-after-user-sessions.conf"
+    conf=$(grep -vE '^[[:space:]]*#' "$ROOT/resources/configs/podman-machine.conf")
+
+    assert_file_exists "$order" "the ssh ordering drop-in exists"
+    assert_matches "$(cat "$order")" '^After=systemd-user-sessions\.service$' \
+        "sshd starts only after user sessions are permitted"
+    assert_contains "$install" "ssh.service.d/20-after-user-sessions.conf" \
+        "install.sh installs the ordering drop-in"
+    # The deadlock from 4c3d9ad must not come back the other way round.
+    assert_not_contains "$(grep -vE '^[[:space:]]*#' "$ROOT/resources/services/post-ignition-setup.service")" \
+        "Before=ssh.service" "post-ignition-setup is still not ordered before ssh"
+
+    assert_matches "$conf" '^PerSourcePenaltyExemptList 192\.168\.127\.1$' \
+        "gvproxy's address is exempt from per-source penalties"
+    assert_matches "$conf" '^MaxStartups [0-9]{3,}:' "MaxStartups is raised above ten"
+}
+
+test_clock_recovers_from_host_sleep() {
+    # A sleeping Mac stops the guest clock; Debian's "makestep 1 3" then only
+    # slews, and the guest stayed most of a day behind for days.
+    local dropin="$ROOT/resources/configs/chrony-podman-machine.conf"
+    assert_file_exists "$dropin" "the chrony drop-in exists"
+    assert_matches "$(cat "$dropin")" '^makestep [0-9.]+ -1$' "chrony may step the clock at any time"
+    assert_contains "$(cat "$ROOT/resources/install.sh")" "/etc/chrony/conf.d/podman-machine.conf" \
+        "install.sh installs the chrony drop-in"
+}
+
+test_health_reports_ssh() {
+    local health
+    health=$(cat "$ROOT/resources/scripts/machine-health.sh")
+    assert_contains "$health" "field ssh" "the health line reports sshd"
+    assert_contains "$health" "Maxstartups" "and counts connections sshd dropped"
+}
+
 test_documentation_links_resolve() {
     # Docs rot quietly; a link to a file that was renamed is worse than no link.
     local doc target missing=0

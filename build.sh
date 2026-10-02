@@ -78,6 +78,8 @@ REQUIRED_FILES=(
     "$RESOURCES_DIR/configs/delegate.conf"
     "$RESOURCES_DIR/configs/podman-machine.conf"
     "$RESOURCES_DIR/configs/ssh-hostkeys.conf"
+    "$RESOURCES_DIR/configs/ssh-after-user-sessions.conf"
+    "$RESOURCES_DIR/configs/chrony-podman-machine.conf"
 )
 
 echo "Validating resources..."

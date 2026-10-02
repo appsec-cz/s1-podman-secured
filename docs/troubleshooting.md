@@ -34,13 +34,15 @@ The machine writes a one line verdict there at the end of boot and whenever
 something changes:
 
 ```
-podman-machine-health: ok units=ok podman=ok/4running storage=btrfs net=192.168.127.2 journal=ok up=1554s
-podman-machine-health: FAULT(1) units=ok podman=ok/0running storage=overlay net=192.168.127.2 journal=blind up=61s
+podman-machine-health: ok units=ok podman=ok/4running storage=btrfs net=192.168.127.2 journal=ok ssh=ok up=1554s
+podman-machine-health: FAULT(1) units=ok podman=ok/0running storage=overlay net=192.168.127.2 journal=blind ssh=ok/3dropped up=61s
 ```
 
 `journal=blind` is the failure below that makes `podman logs` silently empty;
 `storage=` anything but btrfs means the config did not take effect; `podman=
-unresponsive` means the runtime is gone even though the machine is up.
+unresponsive` means the runtime is gone even though the machine is up;
+`ssh=ok/Ndropped` counts connections sshd turned away this boot - see
+[`podman machine ssh` fails now and then](#podman-machine-ssh-fails-now-and-then-exit-255-no-message).
 
 A machine that is idle and well does not keep writing, so an old timestamp is not
 itself a symptom. There is deliberately no queryable endpoint: podman gives the VM
@@ -86,6 +88,63 @@ podman machine start podman-machine-default
 Seen repeatedly on this host, always after a stop, and always cured by clearing
 those processes and retrying. The machine test layer retries once for the same
 reason and reports when it had to.
+
+Images built before sshd was ordered after `systemd-user-sessions.service` had a
+second cause with the same face, described in the next section: if the guest's
+journal for that boot shows `Access denied for user core by PAM account
+configuration`, it was that.
+
+## `podman machine ssh` fails now and then, exit 255, no message
+
+Nothing on stderr, and the next attempt usually works. The guest's sshd log says
+why:
+
+```bash
+podman machine ssh <machine> 'sudo journalctl -u ssh | grep "drop connection"'
+```
+
+Every client on the Mac reaches sshd through gvproxy and so arrives from the same
+address, `192.168.127.1`. Two of sshd's per-source limits therefore treat Podman
+Desktop, the CLI and the API as one noisy client:
+
+- `... Maxstartups` - more than ten handshakes at once, and sshd drops new ones at
+  random. Twenty parallel `podman machine ssh` calls lose two or three.
+- `... penalty: failed authentication` - after failed logins sshd refuses the
+  source for a while, up to ten minutes. At boot this followed
+  `Access denied ... by PAM account configuration`: sshd could start listening
+  before `systemd-user-sessions.service` removed `/run/nologin`, and the host's
+  first connections were rejected. Whether it happened depended on which of the
+  two units won by a few milliseconds.
+
+The image exempts `192.168.127.1` from the penalties, raises `MaxStartups`, and
+starts sshd only after user sessions are permitted. The port is published only on
+the Mac's loopback, so neither limit was protecting anything. An older image can
+be fixed in place:
+
+```bash
+podman machine ssh <machine> 'sudo tee /etc/ssh/sshd_config.d/10-gvproxy.conf' <<'EOF'
+PerSourcePenaltyExemptList 192.168.127.1
+MaxStartups 100:30:200
+EOF
+podman machine ssh <machine> 'sudo mkdir -p /etc/systemd/system/ssh.service.d &&
+  printf "[Unit]\nAfter=systemd-user-sessions.service\n" |
+  sudo tee /etc/systemd/system/ssh.service.d/20-after-user-sessions.conf &&
+  sudo systemctl daemon-reload && sudo systemctl reload ssh'
+```
+
+## The guest clock is hours behind
+
+`date` in the machine disagrees with the Mac, `timedatectl` says
+`System clock synchronized: no`, and `chronyc tracking` reports the system time
+thousands of seconds slow. Sleeping the Mac pauses the VM and its clock, and
+Debian's chrony steps the clock only during its first three updates - after that
+it slews, which takes days to catch up. The image lets chrony step at any time
+(`/etc/chrony/conf.d/podman-machine.conf`); on an older one:
+
+```bash
+podman machine ssh <machine> 'echo "makestep 1 -1" | sudo tee /etc/chrony/conf.d/podman-machine.conf &&
+  sudo systemctl restart chrony && sudo chronyc makestep'
+```
 
 ## Every `podman machine` command says `unknown machine state:`
 
