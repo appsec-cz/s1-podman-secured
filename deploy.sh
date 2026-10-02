@@ -38,6 +38,10 @@ BACKUP_DIR=""
 BACKUP_ROOT="$HOME/.local/share/containers/podman/machine/backups"
 BACKUP_SITE_KEY=""
 RESTORE_STATUS=0
+S1_STATUS=0
+# True while the old machine's data exists only in the backup: from the moment
+# the backup is taken until the restore has had its say.
+BACKUP_PENDING=false
 
 usage() {
     cat << EOF
@@ -210,13 +214,24 @@ require_machine_running() {
 
 BACKUP_GUEST_SCRIPT='
 set -u
-mkdir -p "$DIR/volumes" "$DIR/containers"
+set -o pipefail
+
+# Every list below is what the restore will promise and what the machine
+# replacement trusts. An empty list from a podman that did not answer looks
+# exactly like an empty machine, so a broken podman stops the backup here,
+# before anything has been stopped.
+if ! podman info >/dev/null 2>&1; then
+    echo "BACKUP_FAIL podman does not answer"
+    exit 1
+fi
+mkdir -p "$DIR/volumes" "$DIR/containers" || { echo "BACKUP_FAIL mkdir $DIR"; exit 1; }
 
 # kind nodes are deliberately left out. A node is a running kubelet with etcd
 # state behind it, and replaying its definition does not give back a working
 # cluster - kind has to build those again itself.
-podman ps -a --format "{{.Names}}" | sort > "$DIR/all.txt"
-podman ps -a --filter label=io.x-k8s.kind.cluster --format "{{.Names}}" | sort > "$DIR/skipped.txt"
+podman ps -a --format "{{.Names}}" | sort > "$DIR/all.txt" || echo "BACKUP_FAIL list containers"
+podman ps -a --filter label=io.x-k8s.kind.cluster --format "{{.Names}}" | sort > "$DIR/skipped.txt" \
+    || echo "BACKUP_FAIL list kind nodes"
 comm -23 "$DIR/all.txt" "$DIR/skipped.txt" > "$DIR/carried.txt"
 
 # Written before anything is filtered out, so a container this cannot express
@@ -225,7 +240,7 @@ comm -23 "$DIR/all.txt" "$DIR/skipped.txt" > "$DIR/carried.txt"
 if [ -s "$DIR/carried.txt" ]; then
     xargs -r podman container inspect < "$DIR/carried.txt" > "$DIR/containers.json" 2>/dev/null || true
 fi
-podman pod ls --format "{{.Name}}" | sort > "$DIR/pods.txt"
+podman pod ls --format "{{.Name}}" | sort > "$DIR/pods.txt" || echo "BACKUP_FAIL list pods"
 if [ -s "$DIR/pods.txt" ]; then
     xargs -r podman pod inspect < "$DIR/pods.txt" > "$DIR/pods.json" 2>/dev/null || true
 fi
@@ -235,10 +250,12 @@ fi
 # can. So pods are taken whole and only containers outside any pod individually.
 # Generating several containers into one file is still avoided: that would put
 # unrelated containers in a pod and hand them a shared network namespace.
-podman ps -a --format "{{.Pod}}\t{{.Names}}" | awk -F"\t" "\$1 == \"\" {print \$2}" | sort > "$DIR/standalone.txt"
+podman ps -a --format "{{.Pod}}\t{{.Names}}" | awk -F"\t" "\$1 == \"\" {print \$2}" | sort > "$DIR/standalone.txt" \
+    || echo "BACKUP_FAIL list standalone containers"
 comm -23 "$DIR/standalone.txt" "$DIR/skipped.txt" > "$DIR/containers.txt"
 podman ps -a --format "{{.PodName}}\t{{.IsInfra}}\t{{.Names}}" \
-    | awk -F"\t" "\$1 != \"\" && \$2 == \"false\" {print \$1 \"\t\" \$3}" | sort > "$DIR/members.txt"
+    | awk -F"\t" "\$1 != \"\" && \$2 == \"false\" {print \$1 \"\t\" \$3}" | sort > "$DIR/members.txt" \
+    || echo "BACKUP_FAIL list pod members"
 
 # Recorded before anything is stopped below - taken afterwards this is always
 # empty, and the restore then leaves everything down.
@@ -246,7 +263,7 @@ podman ps -a --format "{{.PodName}}\t{{.IsInfra}}\t{{.Names}}" \
 # Only containers, never pod status: podman calls a pod with some of its
 # containers down "Degraded", and reading that as stopped takes the running ones
 # with it. Starting a container in a stopped pod brings the pod up anyway.
-podman ps --format "{{.Names}}" | sort > "$DIR/running-all.txt"
+podman ps --format "{{.Names}}" | sort > "$DIR/running-all.txt" || echo "BACKUP_FAIL list running"
 
 # A container still writing would hand us a torn volume.
 if [ -s "$DIR/pods.txt" ]; then
@@ -256,12 +273,14 @@ if [ -s "$DIR/containers.txt" ]; then
     xargs -r podman stop -t 10 < "$DIR/containers.txt" >/dev/null 2>&1 || true
 fi
 
-podman images --format "{{.Repository}}:{{.Tag}}" | grep -v "<none>" | sort -u > "$DIR/images.txt"
+podman images --format "{{.Repository}}:{{.Tag}}" > "$DIR/images.all" || echo "BACKUP_FAIL list images"
+grep -v "<none>" "$DIR/images.all" | sort -u > "$DIR/images.txt"
+rm -f "$DIR/images.all"
 if [ -s "$DIR/images.txt" ]; then
     xargs -r podman save --multi-image-archive -o "$DIR/images.tar" < "$DIR/images.txt" || echo "BACKUP_FAIL images"
 fi
 
-podman volume ls --format "{{.Name}}" | sort > "$DIR/volumes.txt"
+podman volume ls --format "{{.Name}}" | sort > "$DIR/volumes.txt" || echo "BACKUP_FAIL list volumes"
 if [ -s "$DIR/volumes.txt" ]; then
     xargs -r podman volume inspect < "$DIR/volumes.txt" > "$DIR/volumes.json" || echo "BACKUP_FAIL volume-inspect"
     while read -r v; do
@@ -316,6 +335,10 @@ fi
 
 podman --version > "$DIR/guest-podman-version.txt" 2>/dev/null || true
 du -sk "$DIR" 2>/dev/null | cut -f1 > "$DIR/size-kb.txt"
+
+# The host takes the backup as complete only on this line. A script that died
+# half way, or an ssh that never connected, does not print it.
+echo BACKUP_OK
 '
 
 backup_machine() {
@@ -344,11 +367,22 @@ backup_machine() {
 
     echo -e "${BLUE}Backing up machine data...${NC}"
     echo "  Into: $BACKUP_DIR"
-    local out
-    out=$(guest_script "$BACKUP_GUEST_SCRIPT" "DIR=$(printf '%q' "$BACKUP_DIR")" 2>&1 | tr -d '\r')
-    if printf '%s' "$out" | grep -q "BACKUP_FAIL"; then
-        echo -e "${RED}Error: the backup did not complete${NC}"
-        printf '%s\n' "$out" | grep "BACKUP_FAIL" | sed 's/^/  /'
+    # Complete means all three: the script ran to its end, it reported no
+    # failure, and it said so. Anything less and the machine must not be
+    # replaced - "podman machine rm" would take the only copy with it.
+    local out rc=0
+    out=$(guest_script "$BACKUP_GUEST_SCRIPT" "DIR=$(printf '%q' "$BACKUP_DIR")" 2>&1) || rc=$?
+    out=$(printf '%s' "$out" | tr -d '\r')
+    if [ "$rc" -ne 0 ] || printf '%s' "$out" | grep -q "BACKUP_FAIL" \
+        || ! printf '%s' "$out" | grep -qx "BACKUP_OK"; then
+        echo -e "${RED}Error: the backup did not complete - the machine was left as it is${NC}"
+        if printf '%s' "$out" | grep -q "BACKUP_FAIL"; then
+            printf '%s\n' "$out" | grep "BACKUP_FAIL" | sed 's/^/  /'
+        else
+            echo "  The backup script did not finish (exit $rc). Its output:"
+            printf '%s\n' "$out" | tail -20 | sed 's/^/  /'
+        fi
+        echo "  Partial backup: $BACKUP_DIR"
         exit 1
     fi
 
@@ -702,8 +736,16 @@ deploy_sentinelone() {
     cat "$S1_PACKAGE" | podman machine ssh "$MACHINE_NAME" "cat > /tmp/$package_name"
 
     # Install package
+    # A failure here is reported, not fatal: the machine already exists, and
+    # with --preserve its data still has to be restored after this.
     echo "  Installing SentinelOne..."
-    podman machine ssh "$MACHINE_NAME" "sudo dpkg -i /tmp/$package_name 2>&1 || sudo apt-get install -f -y 2>&1" >/dev/null
+    local install_out
+    if ! install_out=$(podman machine ssh "$MACHINE_NAME" \
+        "sudo dpkg -i /tmp/$package_name 2>&1 || sudo apt-get install -f -y 2>&1" 2>&1); then
+        echo -e "${RED}  Error: the agent package did not install:${NC}"
+        printf '%s\n' "$install_out" | tr -d '\r' | tail -20 | sed 's/^/    /'
+        S1_STATUS=1
+    fi
 
     # Register if token provided
     if [ -n "$S1_TOKEN" ]; then
@@ -817,8 +859,24 @@ print_summary() {
     fi
 }
 
+# Anything that stops the script between taking the backup and restoring it -
+# a failed init, a start that never comes up - must not leave someone guessing
+# where their images and volumes went.
+on_exit() {
+    local rc=$?
+    if [ "$rc" -ne 0 ] && [ "$BACKUP_PENDING" = "true" ] && [ -n "$BACKUP_DIR" ]; then
+        echo ""
+        echo -e "${RED}Deployment stopped before the machine's data was restored.${NC}"
+        echo "  Images, volumes and containers are backed up in:"
+        echo "    $BACKUP_DIR"
+        echo "  Once a machine is running again, bring them back with:"
+        echo "    $0 --restore $BACKUP_DIR"
+    fi
+}
+
 main() {
     parse_args "$@"
+    trap on_exit EXIT
 
     echo ""
     echo -e "${BLUE}Podman Machine Deployment${NC}"
@@ -845,15 +903,22 @@ main() {
     cleanup_old_machines
     if [ "$PRESERVE" = "true" ]; then
         backup_machine
+        [ -n "$BACKUP_DIR" ] && BACKUP_PENDING=true
     fi
     create_machine
     deploy_sentinelone
     set_default_machine
     if [ "$PRESERVE" = "true" ] && [ -n "$BACKUP_DIR" ]; then
+        # restore_machine reports its own outcome, including where the backup
+        # stays when it is incomplete.
+        BACKUP_PENDING=false
         restore_machine "$BACKUP_DIR" || RESTORE_STATUS=1
     fi
     print_summary
-    exit "$RESTORE_STATUS"
+    if [ "$RESTORE_STATUS" -ne 0 ] || [ "$S1_STATUS" -ne 0 ]; then
+        exit 1
+    fi
+    exit 0
 }
 
 main "$@"

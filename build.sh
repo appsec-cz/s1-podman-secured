@@ -3,7 +3,7 @@
 # Podman Machine Image Builder
 #
 # Builds custom Debian 13 image for Podman machines with:
-# - Offline package installation
+# - Packages installed from the Debian archive, security updates included
 # - Ignition provider for Podman Desktop compatibility
 # - Optional SentinelOne agent
 # - Rosetta x86_64 acceleration support
@@ -25,8 +25,8 @@ VERBOSE="${VERBOSE:-0}"
 DEBUG_BUILD="${DEBUG_BUILD:-0}"
 
 # Packages installed into the image.
-# Single source of truth: the same list is written into the image as
-# /tmp/debs/package-list.txt so install.sh can repair and verify against it.
+# Single source of truth: the same list is uploaded into the image as
+# /tmp/package-list.txt so install.sh can install and verify against it.
 # Pure podman - no Docker Engine. docker.io also conflicts with podman-docker,
 # which is why podman-docker never installed while docker.io was on this list.
 #
@@ -45,7 +45,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CACHE_DIR="$SCRIPT_DIR/cache"
 OUTPUT_DIR="$SCRIPT_DIR/output"
 RESOURCES_DIR="$SCRIPT_DIR/resources"
-DEBS_DIR="$SCRIPT_DIR/debs"
 
 mkdir -p "$CACHE_DIR" "$OUTPUT_DIR"
 
@@ -334,58 +333,15 @@ if ! echo "$CONVERTED_FS" | grep -q "btrfs"; then
 fi
 echo "Btrfs conversion successful"
 
-# Download Podman packages (if not cached)
-if [ ! -d "$DEBS_DIR" ] || [ -z "$(ls -A $DEBS_DIR 2>/dev/null)" ]; then
-    echo ""
-    echo "Downloading Podman packages..."
-    mkdir -p "$DEBS_DIR"
-
-    TEMP_CONTAINER="$CACHE_DIR/debootstrap-temp"
-    rm -rf "$TEMP_CONTAINER"
-    mkdir -p "$TEMP_CONTAINER"
-
-    if ! command -v debootstrap &> /dev/null; then
-        echo "ERROR: debootstrap not installed"
-        exit 1
-    fi
-
-    echo "Creating temporary Debian 13 environment..."
-    sudo debootstrap --variant=minbase trixie "$TEMP_CONTAINER" http://deb.debian.org/debian
-
-    echo "Setting up chroot environment..."
-    sudo mount --bind /dev "$TEMP_CONTAINER/dev"
-    sudo mount --bind /proc "$TEMP_CONTAINER/proc"
-    sudo mount --bind /sys "$TEMP_CONTAINER/sys"
-
-    echo "Downloading required packages..."
-    sudo chroot "$TEMP_CONTAINER" /bin/bash -c "
-        apt-get update
-        cd /tmp
-        apt-get download $PACKAGES 2>/dev/null || true
-    "
-
-    sudo cp "$TEMP_CONTAINER"/tmp/*.deb "$DEBS_DIR/" 2>/dev/null || true
-    sudo chown -R $(id -u):$(id -g) "$DEBS_DIR"
-    printf '%s\n' $PACKAGES > "$DEBS_DIR/package-list.txt"
-
-    PKG_COUNT=$(ls -1 "$DEBS_DIR"/*.deb 2>/dev/null | wc -l)
-    if [ "$PKG_COUNT" -eq 0 ]; then
-        echo "ERROR: Package download failed"
-        exit 1
-    fi
-    echo "✓ Downloaded $PKG_COUNT packages"
-
-    sudo umount "$TEMP_CONTAINER/dev" 2>/dev/null || true
-    sudo umount "$TEMP_CONTAINER/proc" 2>/dev/null || true
-    sudo umount "$TEMP_CONTAINER/sys" 2>/dev/null || true
-    sudo rm -rf "$TEMP_CONTAINER"
-else
-    echo ""
-    echo "Using cached packages in $DEBS_DIR/"
-    PKG_COUNT=$(ls -1 "$DEBS_DIR"/*.deb 2>/dev/null | wc -l)
-    printf '%s\n' $PACKAGES > "$DEBS_DIR/package-list.txt"
-    echo "✓ Using $PKG_COUNT cached packages"
-fi
+# Packages are installed from the Debian archive inside the image, together with
+# every pending update. They used to be pre-downloaded here with debootstrap,
+# which was never offline in practice - apt-get download fetches no dependencies,
+# and install.sh needs the network for unstable and backports anyway - and which
+# did harm: the chroot saw trixie without trixie-security and the result was
+# cached indefinitely, so "dpkg -i" downgraded packages the cloud image already
+# had patched, openssh-server among them.
+PACKAGE_LIST="$CACHE_DIR/package-list.txt"
+printf '%s\n' $PACKAGES > "$PACKAGE_LIST"
 
 # Customize image
 echo ""
@@ -394,7 +350,7 @@ echo "Customizing image..."
 VIRT_CUSTOMIZE_ARGS=(
     --add "$WORK_IMAGE"
     --hostname podman-machine
-    --copy-in "$DEBS_DIR:/tmp/"
+    --upload "$PACKAGE_LIST:/tmp/package-list.txt"
     --copy-in "$RESOURCES_DIR:/tmp/"
 )
 
@@ -430,7 +386,7 @@ fi
 # Run install script
 VIRT_CUSTOMIZE_ARGS+=(
     --run-command "set -o pipefail && bash -x /tmp/resources/install.sh 2>&1 | tee /var/log/image-build-install.log"
-    --run-command "rm -rf /tmp/resources /tmp/debs"
+    --run-command "rm -rf /tmp/resources /tmp/package-list.txt"
 )
 
 virt-customize "${VIRT_CUSTOMIZE_ARGS[@]}"

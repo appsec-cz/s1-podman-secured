@@ -24,6 +24,5 @@ install-deps:
 		qemu-system \
 		xz-utils \
 		zstd \
-		curl \
-		debootstrap
+		curl
 	@echo "Done!"

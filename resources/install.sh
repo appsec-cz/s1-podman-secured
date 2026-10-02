@@ -14,43 +14,32 @@ echo ""
 
 RESOURCES="/tmp/resources"
 
-echo "=== Installing Podman and dependencies (offline) ==="
-cd /tmp/debs
-dpkg -i *.deb || true  # May have dependency issues
-echo "Fixing dependencies..."
-apt-get install -f -y || true  # Fix dependencies
-dpkg --configure -a  # Configure all packages
+# Nothing here may stop on a question: there is no terminal in virt-customize.
+export DEBIAN_FRONTEND=noninteractive
+APT_OPTS="-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
+
+echo "=== Applying pending updates ==="
+# The cloud image is a snapshot, and anything patched since it was built would
+# otherwise ship unpatched. This runs before the packages below so none of them
+# is installed against stale libraries.
+apt-get update -qq
+apt-get $APT_OPTS upgrade
 
 echo ""
-echo "=== Verifying installed packages ==="
-# dpkg -i on the downloaded set leaves packages unconfigured whenever one of their
-# dependencies is not in the set, and the 'apt-get install -f' above then resolves
-# that by REMOVING them. That silently cost the image crun (the OCI runtime named
-# in containers.conf), chrony, cifs-utils and nfs-common - the build reported
-# success because only a handful of packages were ever verified. Every package
-# build.sh intended to install is now repaired and verified.
-if [ ! -f /tmp/debs/package-list.txt ]; then
-    echo "ERROR: /tmp/debs/package-list.txt is missing - build.sh must ship it"
+echo "=== Installing Podman and dependencies ==="
+# Every package build.sh intends to install comes from the list it uploads, and
+# every one of them is verified below. That verification exists because an
+# earlier offline install silently lost crun, chrony, cifs-utils and nfs-common
+# while the build reported success.
+if [ ! -f /tmp/package-list.txt ]; then
+    echo "ERROR: /tmp/package-list.txt is missing - build.sh must ship it"
     exit 1
 fi
-PACKAGES=$(grep -vE '^[[:space:]]*(#|$)' /tmp/debs/package-list.txt | tr '\n' ' ')
+PACKAGES=$(grep -vE '^[[:space:]]*(#|$)' /tmp/package-list.txt | tr '\n' ' ')
 echo "Intended packages: $PACKAGES"
 
 MISSING_PACKAGES=""
-APT_UPDATED=0
-
-for pkg in $PACKAGES; do
-    if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed"; then
-        echo "WARNING: $pkg not installed, attempting installation from repository..."
-        if [ "$APT_UPDATED" = "0" ]; then
-            apt-get update -qq
-            APT_UPDATED=1
-        fi
-        if ! apt-get install -y $pkg; then
-            echo "ERROR: Failed to install $pkg"
-        fi
-    fi
-done
+apt-get $APT_OPTS install $PACKAGES
 
 echo "Verifying package installation..."
 for pkg in $PACKAGES; do

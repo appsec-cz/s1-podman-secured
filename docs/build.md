@@ -6,7 +6,7 @@ The build runs on **Linux with libguestfs**, not on macOS. It produces one file:
 ## Requirements
 
 ```bash
-sudo apt install -y libguestfs-tools qemu-utils qemu-system xz-utils zstd curl debootstrap
+sudo apt install -y libguestfs-tools qemu-utils qemu-system xz-utils zstd curl
 ```
 
 The build host must match the target architecture: an arm64 host builds an arm64
@@ -17,7 +17,7 @@ VM is Debian arm64 and libguestfs falls back to TCG:
 
 ```bash
 podman machine ssh
-sudo apt install -y libguestfs-tools qemu-utils qemu-system debootstrap zstd
+sudo apt install -y libguestfs-tools qemu-utils qemu-system zstd
 mkdir ~/build && cd ~/build
 cp -a /Users/<you>/path/to/repo/{build.sh,resources} .
 sudo env LIBGUESTFS_BACKEND_SETTINGS=force_tcg ./build.sh
@@ -68,10 +68,9 @@ build fails rather than quietly producing an image without an agent.
    EFI stub config and `grub.cfg` for the new filesystem.
 4. **Verifies the bootloader** - fails if any boot config still references the
    old UUID or does not reference the new one.
-5. Downloads the package set into a debootstrap chroot and copies the `.deb`s
-   plus the package list into the image.
-6. Runs `resources/install.sh` inside the image: installs and **verifies every
-   package on the list**, upgrades the container stack from unstable, replaces
+5. Uploads the package list into the image.
+6. Runs `resources/install.sh` inside the image: applies every pending Debian
+   update, installs and **verifies every package on the list**, upgrades the container stack from unstable, replaces
    the kernel with the backports one, installs the provider, services and
    configuration, and drops the btrfs rollback subvolume.
 7. **Verifies the bootloader again** - installing a kernel regenerates

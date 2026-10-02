@@ -179,7 +179,7 @@ the agent's traffic excluded from inspection at the network level - trusting the
 CA in the guest is not a substitute.
 
 **The build needs it too.** `build.sh` fetches the Debian cloud image over HTTPS
-and runs debootstrap and apt, so behind inspection it is the build host's trust
+and runs apt inside it, so behind inspection it is the build host's trust
 store that has to hold the CA, before any of the above applies.
 
 ## A `--volume` share never appears in the machine

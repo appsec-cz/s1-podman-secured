@@ -103,14 +103,13 @@ s1-podman-secured/
 │   └── configs/        podman, network, ssh, sysctl configuration
 ├── tests/              layered test suite, incl. podman's own vendored suite
 ├── output/             built image (gitignored)
-├── debs/               downloaded packages (gitignored)
 └── cache/              build cache (gitignored)
 ```
 
 ## Requirements
 
 **Build host:** Debian or Ubuntu with `libguestfs-tools`, `qemu-system`,
-`qemu-utils`, `debootstrap`, `zstd`.
+`qemu-utils`, `zstd`.
 
 **Mac:** podman 6.x (Podman Desktop optional), Apple Silicon for Rosetta.
 
