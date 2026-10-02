@@ -304,48 +304,49 @@ podman ps -a --format "{{.PodName}}\t{{.IsInfra}}\t{{.Names}}" \
 # with it. Starting a container in a stopped pod brings the pod up anyway.
 podman ps --format "{{.Names}}" | sort > "$DIR/running-all.txt" || echo "BACKUP_FAIL list running"
 
-# A container still writing would hand us a torn volume.
-if [ -s "$DIR/pods.txt" ]; then
-    xargs -r podman pod stop -t 10 < "$DIR/pods.txt" >/dev/null 2>&1 || true
-fi
-if [ -s "$DIR/containers.txt" ]; then
-    xargs -r podman stop -t 10 < "$DIR/containers.txt" >/dev/null 2>&1 || true
-fi
-
-podman images --format "{{.Repository}}:{{.Tag}}" > "$DIR/images.all" || echo "BACKUP_FAIL list images"
-grep -v "<none>" "$DIR/images.all" | sort -u > "$DIR/images.txt"
-rm -f "$DIR/images.all"
-if [ -s "$DIR/images.txt" ]; then
-    xargs -r podman save --multi-image-archive -o "$DIR/images.tar" < "$DIR/images.txt" || echo "BACKUP_FAIL images"
-fi
-
-podman volume ls --format "{{.Name}}" | sort > "$DIR/volumes.txt" || echo "BACKUP_FAIL list volumes"
-if [ -s "$DIR/volumes.txt" ]; then
-    xargs -r podman volume inspect < "$DIR/volumes.txt" > "$DIR/volumes.json" || echo "BACKUP_FAIL volume-inspect"
-    while read -r v; do
-        podman volume export "$v" -o "$DIR/volumes/$v.tar" || echo "BACKUP_FAIL volume $v"
-    done < "$DIR/volumes.txt"
+# Definitions first, while every container is still there and untouched. They
+# used to be generated last, after minutes of image and volume export with
+# everything stopped - and a "prune" in that window (Podman Desktop has one a
+# click away, and stopped containers are exactly what it removes) took all of
+# them, leaving nothing to generate.
+#
+# A container without --rm that cannot be generated is a failure, not a skip:
+# the machine is about to be deleted, and dropping it silently is how 29
+# containers were lost once. Only a --rm container that has exited in the
+# meantime is simply gone.
+if [ -s "$DIR/carried.txt" ]; then
+    xargs -r podman container inspect --format "{{.Name}}\t{{.HostConfig.AutoRemove}}" \
+        < "$DIR/carried.txt" 2>/dev/null | awk -F"\t" "\$2 == \"true\" {print \$1}" \
+        | sort > "$DIR/autoremove.txt"
+else
+    : > "$DIR/autoremove.txt"
 fi
 
-# Anything that cannot be generated is recorded and dropped rather than treated
-# as a failure: the list is a snapshot, and a --rm container that exits between
-# the listing and the export is simply gone. That must not cost the images.
 : > "$DIR/ungenerated.txt"
 : > "$DIR/ungenerated-pods.txt"
 while read -r pod; do
     [ -n "$pod" ] || continue
-    if ! podman kube generate --podman-only "$pod" > "$DIR/containers/pod-$pod.yaml" 2>/dev/null; then
+    if ! podman kube generate --podman-only "$pod" > "$DIR/containers/pod-$pod.yaml" 2>"$DIR/generate.err"; then
         rm -f "$DIR/containers/pod-$pod.yaml"
         echo "$pod" >> "$DIR/ungenerated-pods.txt"
+        if podman pod exists "$pod"; then
+            echo "BACKUP_FAIL cannot generate pod $pod: $(head -1 "$DIR/generate.err")"
+        fi
     fi
 done < "$DIR/pods.txt"
 while read -r c; do
     [ -n "$c" ] || continue
-    if ! podman kube generate --podman-only "$c" > "$DIR/containers/ctr-$c.yaml" 2>/dev/null; then
+    if ! podman kube generate --podman-only "$c" > "$DIR/containers/ctr-$c.yaml" 2>"$DIR/generate.err"; then
         rm -f "$DIR/containers/ctr-$c.yaml"
         echo "$c" >> "$DIR/ungenerated.txt"
+        if podman container exists "$c"; then
+            echo "BACKUP_FAIL cannot generate $c: $(head -1 "$DIR/generate.err")"
+        elif ! grep -qx "$c" "$DIR/autoremove.txt"; then
+            echo "BACKUP_FAIL container $c disappeared during the backup"
+        fi
     fi
 done < "$DIR/containers.txt"
+rm -f "$DIR/generate.err"
 
 # What the restore may promise: standalone containers that generated, plus the
 # members of pods that generated. Infra containers are left out - a rebuilt pod
@@ -365,12 +366,52 @@ sort -u -o "$DIR/expected.txt" "$DIR/expected.txt"
 
 comm -12 "$DIR/running-all.txt" "$DIR/expected.txt" > "$DIR/running.txt"
 
+# A container still writing would hand us a torn volume.
+#
+# One at a time: podman stop and podman start check every name before acting on
+# any, so a single name that no longer exists - a --rm container that has just
+# exited - made the whole call do nothing. The backup then ran against live
+# volumes, and afterwards nothing was started again.
+while read -r pod; do
+    [ -n "$pod" ] && podman pod stop -t 10 "$pod" >/dev/null 2>&1
+done < "$DIR/pods.txt"
+while read -r c; do
+    [ -n "$c" ] && podman stop -t 10 "$c" >/dev/null 2>&1
+done < "$DIR/containers.txt"
+
+podman images --format "{{.Repository}}:{{.Tag}}" > "$DIR/images.all" || echo "BACKUP_FAIL list images"
+grep -v "<none>" "$DIR/images.all" | sort -u > "$DIR/images.txt"
+rm -f "$DIR/images.all"
+if [ -s "$DIR/images.txt" ]; then
+    xargs -r podman save --multi-image-archive -o "$DIR/images.tar" < "$DIR/images.txt" || echo "BACKUP_FAIL images"
+fi
+
+podman volume ls --format "{{.Name}}" | sort > "$DIR/volumes.txt" || echo "BACKUP_FAIL list volumes"
+if [ -s "$DIR/volumes.txt" ]; then
+    xargs -r podman volume inspect < "$DIR/volumes.txt" > "$DIR/volumes.json" || echo "BACKUP_FAIL volume-inspect"
+    while read -r v; do
+        podman volume export "$v" -o "$DIR/volumes/$v.tar" || echo "BACKUP_FAIL volume $v"
+    done < "$DIR/volumes.txt"
+fi
+
+
+# Everything promised must still be there after the export. A container that
+# vanished while it was stopped - a prune, someone cleaning up - would otherwise
+# leave a backup that looks complete and a machine that gets deleted.
+while read -r c; do
+    [ -n "$c" ] || continue
+    podman container exists "$c" || grep -qx "$c" "$DIR/autoremove.txt" \
+        || echo "BACKUP_FAIL container $c disappeared during the backup"
+done < "$DIR/expected.txt"
+
 # The stop above was ours, and taking a backup is not a reason to leave someone
 # with their containers down - least of all with --backup-only, where no machine
-# is being replaced at all.
-if [ -s "$DIR/running.txt" ]; then
-    xargs -r podman start < "$DIR/running.txt" >/dev/null 2>&1 || true
-fi
+# is being replaced at all. Everything that was running, not only what made it
+# into the backup: the restart list used to be the backed-up set, so a backup
+# that captured nothing left every container stopped.
+while read -r c; do
+    [ -n "$c" ] && podman start "$c" >/dev/null 2>&1
+done < "$DIR/running-all.txt"
 
 podman --version > "$DIR/guest-podman-version.txt" 2>/dev/null || true
 du -sk "$DIR" 2>/dev/null | cut -f1 > "$DIR/size-kb.txt"

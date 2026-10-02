@@ -141,6 +141,44 @@ test_restore_starts_only_what_was_running() {
     assert_not_contains "$DEPLOY" 'podman stop -t 5 "$c"' "instead of stopping the rest afterwards"
 }
 
+test_backup_survives_a_prune_and_says_so() {
+    # A prune while the backup had everything stopped took all 29 containers of
+    # a real machine, and the backup - generating last - noticed nothing.
+    local guest gen_line stop_line out tmp bin
+    guest=$(printf '%s\n' "$DEPLOY" | awk "/^BACKUP_GUEST_SCRIPT='/{f=1;next} f&&/^'\$/{exit} f")
+    gen_line=$(printf '%s\n' "$guest" | grep -n 'podman kube generate --podman-only "$c"' | head -1 | cut -d: -f1)
+    stop_line=$(printf '%s\n' "$guest" | grep -n 'podman stop -t 10 "$c"' | head -1 | cut -d: -f1)
+    assert_ne "" "$gen_line" "the backup generates definitions"
+    [ -n "$gen_line" ] && [ -n "$stop_line" ] && [ "$gen_line" -lt "$stop_line" ] \
+        && t_pass "definitions are generated before anything is stopped" \
+        || t_fail "definitions are generated before anything is stopped" "generate at $gen_line, stop at $stop_line"
+    assert_contains "$guest" "disappeared during the backup" \
+        "a container that vanishes during the backup fails it"
+    assert_contains "$guest" 'BACKUP_FAIL cannot generate $c' \
+        "and so does one that exists but cannot be generated"
+
+    # podman stop/start act on nothing when one name is missing, so a single
+    # exited --rm container left every volume being written during the export.
+    assert_not_contains "$guest" "xargs -r podman stop" "containers are stopped one at a time"
+    assert_not_contains "$guest" "xargs -r podman start" "and started one at a time"
+
+    # A container that exists and cannot be generated, against a stand-in podman.
+    tmp=$(mktemp -d); bin=$(mktemp -d)
+    cat > "$bin/podman" <<'STUB'
+#!/bin/sh
+case "$1 $2" in
+    "ps -a") case "$*" in *label=*) ;; *Pod*) printf '\tweb\n' ;; *) echo web ;; esac ;;
+    "kube generate") exit 1 ;;
+    "container exists") exit 0 ;;
+esac
+exit 0
+STUB
+    chmod +x "$bin/podman"
+    out=$( { echo "DIR=$tmp"; printf '%s\n' "$guest"; } | PATH="$bin:$PATH" bash -s 2>&1)
+    rm -rf "$tmp" "$bin"
+    assert_contains "$out" "BACKUP_FAIL cannot generate web" "an existing container that cannot be generated fails the backup"
+}
+
 test_kind_nodes_are_left_behind() {
     # A kind node is a running kubelet with etcd behind it; replaying its
     # definition does not give back a working cluster.
@@ -210,8 +248,10 @@ test_transient_containers_do_not_fail_the_backup() {
 
 test_backup_leaves_containers_as_it_found_them() {
     # --backup-only replaces nothing, so it must not leave everything stopped.
-    assert_contains "$DEPLOY" 'xargs -r podman start < "$DIR/running.txt"' \
-        "containers stopped for the export are started again"
+    # Everything that was running, not only what made it into the backup - a
+    # backup that captured nothing used to leave every container stopped.
+    assert_contains "$DEPLOY" 'done < "$DIR/running-all.txt"' \
+        "every container that was running is started again"
     # Pod status is deliberately not used: podman calls a pod with some
     # containers down "Degraded", and reading that as stopped took the running
     # ones with it on restore. Starting a container brings its pod up anyway.
