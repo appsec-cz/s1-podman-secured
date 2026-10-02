@@ -96,83 +96,22 @@ class TestIgnitionProvider(unittest.TestCase):
         hostname = self.provider.extract_hostname_from_config(config)
         self.assertIsNone(hostname)
 
-    def test_get_host_hostname_hint_plain(self):
-        """Test host hostname hint extraction with plain data: URI."""
-        config = {
-            'storage': {
-                'files': [{
-                    'path': '/etc/host-info',
-                    'contents': {
-                        'source': 'data:,HOST_HOSTNAME=MacBook-Pro%0AMACHINE_NAME=test'
-                    }
-                }]
-            }
-        }
-
-        hint = self.provider.get_host_hostname_hint(config)
-        self.assertEqual(hint, 'MacBook-Pro')
-
-    def test_get_host_hostname_hint_base64(self):
-        """Test host hostname hint extraction with base64 encoding."""
-        import base64
-        host_info = "HOST_HOSTNAME=MacBook-Pro\nMACHINE_NAME=test"
-        host_info_b64 = base64.b64encode(host_info.encode()).decode()
-
-        config = {
-            'storage': {
-                'files': [{
-                    'path': '/etc/host-info',
-                    'contents': {
-                        'source': f'data:text/plain;charset=utf-8;base64,{host_info_b64}'
-                    }
-                }]
-            }
-        }
-
-        hint = self.provider.get_host_hostname_hint(config)
-        self.assertEqual(hint, 'MacBook-Pro')
-
-    def test_get_host_hostname_hint_missing(self):
-        """Test host hostname hint when /etc/host-info is missing."""
-        config = {
-            'storage': {
-                'files': []
-            }
-        }
-
-        hint = self.provider.get_host_hostname_hint(config)
-        self.assertIsNone(hint)
-
     @patch('ignition_provider.subprocess.run')
     @patch('builtins.open', create=True)
-    def test_set_enhanced_hostname_with_host(self, mock_open, mock_subprocess):
-        """Test enhanced hostname creation with host hint."""
-        config = {
-            'storage': {
-                'files': [
-                    {
-                        'path': '/etc/hostname',
-                        'contents': {'source': 'data:,my-machine'}
-                    },
-                    {
-                        'path': '/etc/host-info',
-                        'contents': {'source': 'data:,HOST_HOSTNAME=MacBook-Pro%0AMACHINE_NAME=my-machine'}
-                    }
-                ]
-            }
-        }
-
-        # Mock file writes
-        mock_file = MagicMock()
-        mock_open.return_value.__enter__.return_value = mock_file
+    def test_set_enhanced_hostname_is_a_valid_label(self, mock_open, mock_subprocess):
+        """Odd characters become dashes and the result fits one DNS label."""
+        config = {'storage': {'files': [{
+            'path': '/etc/hostname',
+            'contents': {'source': 'data:,' + 'my_machine.' + 'x' * 80},
+        }]}}
+        mock_open.return_value.__enter__.return_value = MagicMock()
 
         self.provider.set_enhanced_hostname(config)
 
-        # Verify hostname command was called
-        mock_subprocess.assert_called()
-        args = mock_subprocess.call_args_list[0][0][0]
-        self.assertEqual(args[0], 'hostname')
-        self.assertEqual(args[1], 'MacBook-Pro-podman-my-machine')
+        hostname = mock_subprocess.call_args_list[0][0][0][1]
+        self.assertTrue(hostname.startswith('my-machine-'))
+        self.assertLessEqual(len(hostname), 63)
+        self.assertRegex(hostname, r'^[A-Za-z0-9-]+$')
 
     @patch('ignition_provider.subprocess.run')
     @patch('builtins.open', create=True)
@@ -308,6 +247,26 @@ class TestIgnitionProvider(unittest.TestCase):
         self.assertTrue(os.path.islink(link))
         self.assertEqual(os.readlink(link), target)
 
+    def test_create_link_over_a_dangling_link(self):
+        """A dangling link read as absent: not replaced, and symlink_to() failed."""
+        link = os.path.join(self.test_dir, 'link')
+        os.symlink(os.path.join(self.test_dir, 'gone'), link)
+        target = os.path.join(self.test_dir, 'target.txt')
+        Path(target).touch()
+
+        self.provider.create_link({'path': link, 'target': target, 'overwrite': True})
+        self.assertEqual(os.readlink(link), target)
+
+    def test_create_link_keeps_a_dangling_link_without_overwrite(self):
+        link = os.path.join(self.test_dir, 'link')
+        dangling = os.path.join(self.test_dir, 'gone')
+        os.symlink(dangling, link)
+
+        with self.assertLogs('ignition-provider', level='INFO') as logs:
+            self.provider.create_link({'path': link, 'target': '/elsewhere', 'overwrite': False})
+        self.assertEqual(os.readlink(link), dangling)
+        self.assertFalse(any('ERROR' in line for line in logs.output))
+
     def test_apply_config_skips_hostname(self):
         """Test that apply_config skips /etc/hostname to preserve enhanced version."""
         config = {
@@ -349,6 +308,100 @@ class TestIgnitionProvider(unittest.TestCase):
         # Verify other file WAS created
         other_file = os.path.join(self.test_dir, 'other.txt')
         self.assertTrue(os.path.exists(other_file))
+
+
+class TestHostHome(unittest.TestCase):
+    """Which /Users entry is the machine owner's - never just the first one."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.root)
+
+    def home(self, name, machines=()):
+        h = self.root / name
+        (h / 'Library').mkdir(parents=True)
+        for m in machines:
+            d = h / '.config' / 'containers' / 'podman' / 'machine' / 'applehv'
+            d.mkdir(parents=True, exist_ok=True)
+            (d / f'{m}.json').write_text('{}')
+        return h
+
+    def find(self, machine):
+        return IgnitionProvider.find_host_home(machine, self.root)
+
+    def test_the_owner_of_the_machine_is_chosen(self):
+        self.home('alice', machines=['other'])
+        bob = self.home('bob', machines=['podman-machine-default'])
+        self.home('carol')
+        self.assertEqual(self.find('podman-machine-default'), bob)
+
+    def test_a_home_without_the_machine_is_never_chosen(self):
+        self.home('alice')
+        self.assertIsNone(self.find('podman-machine-default'))
+
+    def test_two_owners_is_not_guessed(self):
+        self.home('alice', machines=['podman-machine-default'])
+        self.home('bob', machines=['podman-machine-default'])
+        self.assertIsNone(self.find('podman-machine-default'))
+
+    def test_no_machine_name(self):
+        self.home('alice', machines=['x'])
+        self.assertIsNone(self.find(None))
+
+
+class TestRegistriesSetup(unittest.TestCase):
+    """The VM reads the host's registry configuration; it never writes it."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.users = self.root / 'Users'
+        self.vm_dir = self.root / 'etc-registries.conf.d'
+        self.home = self.users / 'glux'
+        d = self.home / '.config' / 'containers' / 'podman' / 'machine' / 'applehv'
+        d.mkdir(parents=True)
+        (d / 'm.json').write_text('{}')
+        self.config = {'storage': {'files': [
+            {'path': '/etc/hostname', 'contents': {'source': 'data:,m'}}]}}
+
+    def tearDown(self):
+        shutil.rmtree(self.root)
+
+    def run_setup(self):
+        provider = IgnitionProvider()
+        real_path = ignition_provider.Path
+
+        def fake_path(p, *rest):
+            if str(p) == '/etc/containers/registries.conf.d':
+                return real_path(self.vm_dir)
+            return real_path(p, *rest)
+
+        real_find = IgnitionProvider.find_host_home
+        with patch.object(ignition_provider, 'Path', side_effect=fake_path), \
+             patch.object(IgnitionProvider, 'find_host_home',
+                          side_effect=lambda name: real_find(name, self.users)):
+            provider.setup_registries_conf_symlink(self.config)
+
+    def test_search_is_docker_io_only(self):
+        self.run_setup()
+        conf = (self.vm_dir / '00-unqualified-search.conf').read_text()
+        self.assertIn('["docker.io"]', conf)
+        self.assertNotIn('quay.io', conf)
+
+    def test_nothing_is_written_on_the_host(self):
+        self.run_setup()
+        self.assertFalse((self.home / '.config' / 'containers' / 'registries.conf').exists())
+        self.assertFalse((self.vm_dir / '999-podman-desktop.conf').is_symlink(),
+                         "no dangling symlink to a host file that does not exist")
+
+    def test_an_existing_host_file_is_linked(self):
+        host_conf = self.home / '.config' / 'containers' / 'registries.conf'
+        host_conf.write_text('# host\n')
+        self.run_setup()
+        link = self.vm_dir / '999-podman-desktop.conf'
+        self.assertEqual(os.readlink(link), str(host_conf))
+        self.assertEqual(host_conf.read_text(), '# host\n')
 
 
 class FakeSocket:

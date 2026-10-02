@@ -107,9 +107,14 @@ else
     echo "WARNING: could not upgrade the container stack, keeping the stable versions"
 fi
 
-# The pin stays in the image on purpose: without it a later apt-get upgrade in
-# the running machine would have no idea these packages came from unstable and
-# would happily pull the rest of unstable along with them.
+# The pin stays in the image on purpose. At priority 100 unstable never wins
+# over stable for a package that came from stable, so a later apt-get upgrade in
+# the running machine leaves the rest of the system on trixie. The five packages
+# taken from unstable do follow it - but only while their newer builds still
+# run on trixie's libraries. Once unstable rebuilds one against something newer
+# (podman 5.8.6+ds1-2+b1 needs libc6 2.43, trixie has 2.41), apt keeps it back,
+# and from then on it gets no updates in place at all, security fixes included.
+# Rebuilding the image is the only way forward from that point.
 apt-get update -qq
 
 echo ""

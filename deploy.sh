@@ -80,19 +80,40 @@ Examples:
 EOF
 }
 
+# An option that takes a value must get one. Without this "--token" as the last
+# argument ended the script under set -e with no message at all, and
+# "--token --cpus 4" took "--cpus" as the token.
+need_value() {
+    if [ $# -lt 2 ] || [ -z "$2" ] || [ "${2#--}" != "$2" ]; then
+        echo -e "${RED}Error: $1 needs a value${NC}"
+        usage
+        exit 1
+    fi
+}
+
+need_number() {
+    need_value "$@"
+    case "$2" in
+        *[!0-9]*)
+            echo -e "${RED}Error: $1 needs a whole number, got '$2'${NC}"
+            exit 1
+            ;;
+    esac
+}
+
 parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --help|-h) usage; exit 0 ;;
-            --token|-t) S1_TOKEN="$2"; shift 2 ;;
-            --cpus) CPUS="$2"; shift 2 ;;
-            --memory) MEMORY="$2"; shift 2 ;;
-            --disk-size) DISK_SIZE="$2"; shift 2 ;;
-            --image) IMAGE_PATH="$2"; shift 2 ;;
+            --token|-t) need_value "$@"; S1_TOKEN="$2"; shift 2 ;;
+            --cpus) need_number "$@"; CPUS="$2"; shift 2 ;;
+            --memory) need_number "$@"; MEMORY="$2"; shift 2 ;;
+            --disk-size) need_number "$@"; DISK_SIZE="$2"; shift 2 ;;
+            --image) need_value "$@"; IMAGE_PATH="$2"; shift 2 ;;
             --preserve) PRESERVE=true; shift ;;
             --keep-backup) KEEP_BACKUP=true; shift ;;
             --backup-only) MODE="backup"; shift ;;
-            --restore) MODE="restore"; BACKUP_DIR="$2"; shift 2 ;;
+            --restore) need_value "$@"; MODE="restore"; BACKUP_DIR="$2"; shift 2 ;;
             *) echo -e "${RED}Unknown option: $1${NC}"; usage; exit 1 ;;
         esac
     done

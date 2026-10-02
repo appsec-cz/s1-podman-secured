@@ -513,6 +513,45 @@ test_health_detects_a_dead_podman() {
     assert_contains "$health" 'timeout "$PODMAN_TIMEOUT"' "podman calls are bounded"
 }
 
+test_ready_waits_for_a_real_address() {
+    # "inet " alone matched 127.0.0.1, so the network wait passed at once.
+    assert_contains "$(cat "$ROOT/resources/scripts/podman-machine-ready.sh")" \
+        'ip -4 addr show scope global | grep -q "inet "' "the network wait ignores loopback"
+}
+
+test_build_host_dependencies_are_complete() {
+    # build.sh runs btrfs-convert; install-deps did not install it.
+    assert_contains "$(cat "$ROOT/Makefile")" "btrfs-progs" "make install-deps installs btrfs-progs"
+    assert_contains "$(cat "$ROOT/docs/build.md")" "btrfs-progs" "and the build docs list it"
+}
+
+test_partition_hint_is_anchored() {
+    # "hd0,gpt1" is also the start of "hd0,gpt15". The expression from build.sh,
+    # run on what grub-mkconfig writes.
+    local expr out
+    expr=$(grep -o -e '-e "s/(hd0.*g"' "$ROOT/build.sh")
+    assert_ne "" "$expr" "build.sh rewrites partition hints with an anchored expression"
+    out=$(ROOT_PARTNUM=2; printf '%s\n' "set root='hd0,gpt1'" \
+        "--hint-efi=hd0,gpt1 --hint-baremetal=ahci0,gpt1 UUID" "set root='hd0,gpt15'" \
+        | eval "sed -E $expr")
+    assert_contains "$out" "set root='hd0,gpt2'" "gpt1 becomes the root partition"
+    assert_contains "$out" "--hint-efi=hd0,gpt2 --hint-baremetal=ahci0,gpt2 UUID" "in every hint"
+    assert_contains "$out" "set root='hd0,gpt15'" "and gpt15 is left alone"
+}
+
+test_ssh_takes_keys_only() {
+    local conf
+    conf=$(grep -vE '^[[:space:]]*#' "$ROOT/resources/configs/podman-machine.conf")
+    assert_matches "$conf" '^PasswordAuthentication no$' "password logins are off"
+    assert_matches "$conf" '^KbdInteractiveAuthentication no$' "keyboard-interactive too"
+}
+
+test_no_sysctl_that_never_applies() {
+    # net.bridge.* only exists with br_netfilter loaded, which nothing loads.
+    assert_not_contains "$(cat "$ROOT/resources/configs/99-podman.conf")" "net.bridge." \
+        "no bridge netfilter settings that could never take effect"
+}
+
 test_documentation_links_resolve() {
     # Docs rot quietly; a link to a file that was renamed is worse than no link.
     local doc target missing=0

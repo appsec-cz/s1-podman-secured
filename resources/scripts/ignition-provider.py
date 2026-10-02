@@ -706,16 +706,22 @@ class IgnitionProvider:
             # Create parent directories
             link_path.parent.mkdir(parents=True, exist_ok=True)
 
+            # exists() follows a symlink, so a dangling one reads as absent:
+            # it was neither replaced nor skipped, and symlink_to() then failed
+            # on it. lexists() asks about the link itself.
+            present = os.path.lexists(link_path)
+
             # Remove existing link/file if overwrite is true
-            if overwrite and link_path.exists():
+            if overwrite and present:
                 if link_path.is_symlink() or link_path.is_file():
                     link_path.unlink()
                 elif link_path.is_dir():
                     import shutil
                     shutil.rmtree(link_path)
+                present = False
 
             # Create symlink
-            if not link_path.exists():
+            if not present:
                 link_path.symlink_to(target)
 
                 # Set ownership (note: symlinks don't have permissions)
@@ -910,61 +916,12 @@ class IgnitionProvider:
 
         return None
 
-    def get_host_hostname_hint(self, config: Dict[str, Any]) -> Optional[str]:
-        """
-        Try to extract host hostname hint from Ignition config.
-
-        Checks for /etc/host-info file created by podman-machine-init-wrapper.sh
-        which contains HOST_HOSTNAME=<hostname>
-
-        Args:
-            config: Ignition configuration dict
-
-        Returns:
-            Host hostname hint or None
-        """
-        storage = config.get('storage', {})
-        files = storage.get('files', [])
-
-        for file_config in files:
-            if file_config.get('path') == '/etc/host-info':
-                contents = file_config.get('contents', {})
-                source = contents.get('source', '')
-
-                # Decode data: URI
-                if source.startswith('data:'):
-                    try:
-                        parts = source.split(',', 1)
-                        if len(parts) == 2:
-                            data = parts[1]
-                            # Check if base64 encoded
-                            if 'base64' in parts[0]:
-                                host_info = base64.b64decode(data).decode('utf-8')
-                            else:
-                                # URL decode %0A (newline)
-                                import urllib.parse
-                                host_info = urllib.parse.unquote(data)
-
-                            # Parse HOST_HOSTNAME=value
-                            for line in host_info.split('\n'):
-                                if line.startswith('HOST_HOSTNAME='):
-                                    hostname = line.split('=', 1)[1].strip()
-                                    logger.info(f"Extracted host hostname from Ignition: {hostname}")
-                                    return hostname
-                    except Exception as e:
-                        logger.error(f"Failed to decode host-info: {e}")
-
-        return None
-
     def set_enhanced_hostname(self, config: Dict[str, Any]) -> None:
         """
-        Set enhanced hostname with host system information.
+        Set the hostname to <machine-name>-podman.
 
-        Creates hostname in format: <machine-name>-podman
-        Or if host hint available: <host-hint>-podman-<machine-name>
-
-        Args:
-            config: Ignition configuration dict
+        The machine name comes from the /etc/hostname podman puts in the config.
+        The suffix keeps the VM distinguishable from the Mac it runs on.
         """
         machine_name = self.extract_hostname_from_config(config)
 
@@ -972,125 +929,42 @@ class IgnitionProvider:
             logger.warning("No hostname found in Ignition config, keeping default")
             return
 
-        # Try to get host hostname hint
-        host_hint = self.get_host_hostname_hint(config)
-
-        if host_hint:
-            # Format: <host>-podman-<machine>
-            enhanced_hostname = f"{host_hint}-podman-{machine_name}"
-        else:
-            # Format: <machine>-podman
-            enhanced_hostname = f"{machine_name}-podman"
-
-        # Sanitize hostname (max 64 chars, alphanumeric + dash)
-        enhanced_hostname = enhanced_hostname[:64]
+        # Sanitize hostname (max 63 chars per label, alphanumeric + dash)
+        enhanced_hostname = f"{machine_name}-podman"
         enhanced_hostname = ''.join(c if c.isalnum() or c == '-' else '-'
                                     for c in enhanced_hostname)
-        enhanced_hostname = enhanced_hostname.strip('-')
+        enhanced_hostname = enhanced_hostname[:63].strip('-')
 
         logger.info(f"Setting enhanced hostname: {enhanced_hostname}")
 
-        # Write to /etc/hostname
         try:
             with open('/etc/hostname', 'w') as f:
                 f.write(f"{enhanced_hostname}\n")
 
-            # Set hostname immediately
             subprocess.run(['hostname', enhanced_hostname], check=True, capture_output=True)
-
             logger.info(f"Enhanced hostname set successfully: {enhanced_hostname}")
-
-            # Save for SentinelOne configuration
-            with open('/etc/podman-machine-info', 'w') as f:
-                f.write(f"MACHINE_NAME={machine_name}\n")
-                f.write(f"ENHANCED_HOSTNAME={enhanced_hostname}\n")
-                if host_hint:
-                    f.write(f"HOST_HINT={host_hint}\n")
 
         except Exception as e:
             logger.error(f"Failed to set enhanced hostname: {e}", exc_info=True)
 
     def configure_sentinelone(self, config: Dict[str, Any]) -> None:
         """
-        Configure SentinelOne agent with custom identification.
+        Register a SentinelOne agent baked into the image, if there is one.
 
-        Sets:
-        - Customer ID (from hostname or config)
-        - Custom tags for filtering in console
+        Deployments install the agent afterwards with deploy.sh, which registers
+        it itself; this only matters for an image built with the agent inside.
 
-        Args:
-            config: Ignition configuration dict
+        There used to be more here - a customer ID from a /etc/host-info file
+        nothing ever wrote, an /etc/sentinelone/config.json nothing ever read,
+        and a "sentinelctl config set customer_id" logged as done whether or not
+        it was. Removed rather than kept as a promise the code did not keep.
         """
-        logger.info("Configuring SentinelOne agent identification")
-
-        # Check if SentinelOne is installed
         sentinelctl_path = '/opt/sentinelone/bin/sentinelctl'
         if not os.path.exists(sentinelctl_path):
             logger.info("SentinelOne not installed, skipping configuration")
             return
 
-        # Read machine info
-        machine_name = self.extract_hostname_from_config(config)
-        enhanced_hostname = None
-        host_hint = None
-
-        if os.path.exists('/etc/podman-machine-info'):
-            try:
-                with open('/etc/podman-machine-info', 'r') as f:
-                    for line in f:
-                        if line.startswith('ENHANCED_HOSTNAME='):
-                            enhanced_hostname = line.split('=', 1)[1].strip()
-                        elif line.startswith('HOST_HINT='):
-                            host_hint = line.split('=', 1)[1].strip()
-            except Exception as e:
-                logger.warning(f"Failed to read machine info: {e}")
-
-        # Set customer ID
-        customer_id = host_hint or machine_name or "podman-machine"
-        logger.info(f"Setting SentinelOne customer ID: {customer_id}")
-
-        try:
-            # Create SentinelOne config file
-            s1_config = {
-                'customer_id': customer_id,
-                'tags': {
-                    'podman_machine': 'true',
-                    'machine_type': 'podman',
-                }
-            }
-
-            if machine_name:
-                s1_config['tags']['machine_name'] = machine_name
-
-            if host_hint:
-                s1_config['tags']['host_system'] = host_hint
-
-            # Write config file for SentinelOne installation
-            config_path = '/etc/sentinelone/config.json'
-            os.makedirs('/etc/sentinelone', exist_ok=True)
-
-            with open(config_path, 'w') as f:
-                json.dump(s1_config, f, indent=2)
-
-            logger.info(f"SentinelOne config written to {config_path}")
-
-            # Try to set customer ID if agent is already installed
-            try:
-                subprocess.run(
-                    [sentinelctl_path, 'config', 'set', 'customer_id', customer_id],
-                    check=False,  # Don't fail if command doesn't work
-                    capture_output=True,
-                    timeout=5
-                )
-                logger.info("Set SentinelOne customer ID via sentinelctl")
-            except Exception as e:
-                logger.debug(f"Could not set customer ID via sentinelctl: {e}")
-
-            # Register agent with management console if token is available
-            self.register_sentinelone_agent(sentinelctl_path)
-
-        except Exception as e:
-            logger.error(f"Failed to configure SentinelOne: {e}", exc_info=True)
+        self.register_sentinelone_agent(sentinelctl_path)
 
     def register_sentinelone_agent(self, sentinelctl_path: str) -> None:
         """
@@ -1214,122 +1088,85 @@ class IgnitionProvider:
 
         logger.info("Ignition configuration applied successfully")
 
+    @staticmethod
+    def find_host_home(machine_name: Optional[str], users_root: Path = Path('/Users')) -> Optional[Path]:
+        """
+        The home of the Mac user this machine belongs to, as seen over /Users.
+
+        Every home on the Mac is visible there, so "the first directory that
+        looks like a home" can be someone else's. The owner is the one whose
+        podman configuration defines a machine of this name.
+        """
+        if not machine_name or not users_root.is_dir():
+            return None
+        candidates = []
+        try:
+            entries = sorted(users_root.iterdir())
+        except OSError:
+            return None
+        for entry in entries:
+            if entry.name.startswith('.') or entry.name == 'Shared':
+                continue
+            machine_dir = entry / '.config' / 'containers' / 'podman' / 'machine'
+            try:
+                if any(machine_dir.glob(f'*/{machine_name}.json')):
+                    candidates.append(entry)
+            except OSError:
+                continue  # someone else's home, not readable - not ours
+        if len(candidates) == 1:
+            return candidates[0]
+        if candidates:
+            logger.warning(
+                f"Machine '{machine_name}' is defined in several homes "
+                f"({', '.join(str(c) for c in candidates)}); not guessing"
+            )
+        return None
+
     def setup_registries_conf_symlink(self, config: Dict[str, Any]) -> None:
         """
-        Setup registry configuration for Podman Desktop compatibility.
+        Make the host's registries.conf apply in the VM, the way Podman Desktop
+        expects: a symlink in /etc/containers/registries.conf.d pointing at the
+        host user's ~/.config/containers/registries.conf over the /Users mount.
 
-        Podman Desktop expects a symlink INSIDE /etc/containers/registries.conf.d/
-        that points to the host's ~/.config/containers/registries.conf FILE.
+        Nothing is written on the host. This used to create the host's
+        registries.conf when it was missing and fill it with four search
+        registries; the VM's business is to read the host's configuration, not
+        to author it. Without a host file there is no symlink either - a
+        dangling one in registries.conf.d breaks every podman command.
 
-        This method:
-        1. Finds host home via virtiofs mount (/Users/<username>)
-        2. Creates host registries.conf file if needed
-        3. Creates symlink inside VM's registries.conf.d/ pointing to host file
-        4. Adds default unqualified-search-registries config
-
-        Args:
-            config: Ignition configuration dict
+        Unqualified names resolve against docker.io only. Searching several
+        registries for a short name lets whichever answers first supply the
+        image, which is how short-name squatting works.
         """
-        logger.info("Setting up registry configuration for Podman Desktop")
-
-        # Find host home directory via virtiofs mount
-        # On macOS, /Users is mounted via virtiofs and contains the host user's home
-        host_home = None
-        users_mount = Path('/Users')
-
-        if users_mount.exists() and users_mount.is_dir():
-            # Look for user home directories in /Users (skip system dirs)
-            skip_dirs = {'Shared', 'Guest', '.localized'}
-            for entry in users_mount.iterdir():
-                if entry.is_dir() and entry.name not in skip_dirs and not entry.name.startswith('.'):
-                    # Check if this looks like a user home with containers config
-                    containers_config = entry / '.config' / 'containers'
-                    if containers_config.exists():
-                        host_home = entry
-                        logger.info(f"Found host home via virtiofs: {host_home}")
-                        break
-                    # Also accept homes without containers config yet
-                    elif (entry / '.config').exists() or (entry / 'Library').exists():
-                        host_home = entry
-                        logger.info(f"Found host home via virtiofs (no containers config yet): {host_home}")
-                        # Continue looking for one with containers config
-                        continue
-
-        if not host_home:
-            logger.warning("No host home directory found via virtiofs /Users mount")
-            logger.warning("Skipping registry configuration setup")
-            return
-
-        # Host registries.conf FILE path (not directory)
-        host_config_base = host_home / '.config' / 'containers'
-        host_registries_conf = host_config_base / 'registries.conf'
+        logger.info("Setting up registry configuration")
         vm_registries_dir = Path('/etc/containers/registries.conf.d')
 
         try:
-            # Create host config directory structure if needed
-            host_config_base.mkdir(parents=True, exist_ok=True)
-            logger.info(f"Ensured host containers config exists: {host_config_base}")
+            vm_registries_dir.mkdir(parents=True, exist_ok=True)
 
-            # Create host registries.conf file if it doesn't exist
-            if not host_registries_conf.exists():
-                default_config = '''# Podman registries configuration
-# This file is managed by Podman Desktop
-
-unqualified-search-registries = ["docker.io", "quay.io", "gcr.io", "ghcr.io"]
-'''
-                host_registries_conf.write_text(default_config)
-                logger.info(f"Created host registries.conf: {host_registries_conf}")
-
-            # Ensure VM registries.conf.d is a directory (not a symlink)
-            if vm_registries_dir.is_symlink():
-                # If it's a symlink, we need to convert it to a directory
-                symlink_target = vm_registries_dir.resolve()
-                vm_registries_dir.unlink()
-                vm_registries_dir.mkdir(parents=True, exist_ok=True)
-                logger.info(f"Converted registries.conf.d from symlink to directory")
-
-                # Copy files from old symlink target if they exist
-                if symlink_target.exists() and symlink_target.is_dir():
-                    import shutil
-                    for conf_file in symlink_target.glob('*.conf'):
-                        target = vm_registries_dir / conf_file.name
-                        if not target.exists():
-                            shutil.copy2(conf_file, target)
-                            logger.info(f"Copied {conf_file.name} from old symlink target")
-
-            elif not vm_registries_dir.exists():
-                vm_registries_dir.mkdir(parents=True, exist_ok=True)
-                logger.info(f"Created registries.conf.d directory")
-
-            # Create symlink INSIDE registries.conf.d/ pointing to host's registries.conf FILE
-            # Podman Desktop checks: find /etc/containers/registries.conf.d/ -lname "$HOME/.config/containers/registries.conf"
-            symlink_path = vm_registries_dir / '999-podman-desktop.conf'
-            symlink_target = host_registries_conf
-
-            if symlink_path.is_symlink():
-                current_target = os.readlink(symlink_path)
-                if current_target != str(symlink_target):
-                    symlink_path.unlink()
-                    symlink_path.symlink_to(symlink_target)
-                    logger.info(f"Updated symlink: {symlink_path} -> {symlink_target}")
-                else:
-                    logger.info(f"Symlink already correct: {symlink_path}")
-            elif symlink_path.exists():
-                # Regular file exists, remove it and create symlink
-                symlink_path.unlink()
-                symlink_path.symlink_to(symlink_target)
-                logger.info(f"Replaced file with symlink: {symlink_path} -> {symlink_target}")
-            else:
-                symlink_path.symlink_to(symlink_target)
-                logger.info(f"Created symlink: {symlink_path} -> {symlink_target}")
-
-            # Also add default unqualified-search-registries if not present in VM config
             default_search_conf = vm_registries_dir / '00-unqualified-search.conf'
             if not default_search_conf.exists():
-                default_search_conf.write_text(
-                    'unqualified-search-registries = ["docker.io", "quay.io", "gcr.io", "ghcr.io"]\n'
-                )
+                default_search_conf.write_text('unqualified-search-registries = ["docker.io"]\n')
                 logger.info(f"Created default search registries config: {default_search_conf}")
+
+            host_home = self.find_host_home(self.extract_hostname_from_config(config))
+            if not host_home:
+                logger.warning("Host home not identified - the host's registries.conf is not linked")
+                return
+
+            host_registries_conf = host_home / '.config' / 'containers' / 'registries.conf'
+            if not host_registries_conf.is_file():
+                logger.info(f"No {host_registries_conf} on the host - nothing to link")
+                return
+
+            symlink_path = vm_registries_dir / '999-podman-desktop.conf'
+            if symlink_path.is_symlink() and os.readlink(symlink_path) == str(host_registries_conf):
+                logger.info(f"Symlink already correct: {symlink_path}")
+                return
+            if os.path.lexists(symlink_path):
+                symlink_path.unlink()
+            symlink_path.symlink_to(host_registries_conf)
+            logger.info(f"Created symlink: {symlink_path} -> {host_registries_conf}")
 
         except Exception as e:
             logger.error(f"Failed to setup registry configuration: {e}", exc_info=True)

@@ -92,6 +92,21 @@ test_interactivity_comes_from_the_terminal() {
         "main decides interactivity from the terminal"
 }
 
+test_options_without_a_value_are_refused() {
+    # "--token" as the last argument used to end the script silently under
+    # set -e, and "--token --cpus 4" took "--cpus" as the token.
+    local out rc
+    out=$(bash "$ROOT/deploy.sh" --token 2>&1); rc=$?
+    assert_contains "$out" "--token needs a value" "a trailing --token is reported"
+    assert_eq 1 "$rc" "and fails"
+    out=$(bash "$ROOT/deploy.sh" --token --cpus 4 2>&1)
+    assert_contains "$out" "--token needs a value" "an option is not taken as a value"
+    out=$(bash "$ROOT/deploy.sh" --cpus four 2>&1)
+    assert_contains "$out" "--cpus needs a whole number" "numbers are checked"
+    out=$(bash "$ROOT/deploy.sh" --restore 2>&1)
+    assert_contains "$out" "--restore needs a value" "--restore without a directory is reported"
+}
+
 test_kind_nodes_are_left_behind() {
     # A kind node is a running kubelet with etcd behind it; replaying its
     # definition does not give back a working cluster.

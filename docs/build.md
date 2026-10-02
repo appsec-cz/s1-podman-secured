@@ -6,7 +6,7 @@ The build runs on **Linux with libguestfs**, not on macOS. It produces one file:
 ## Requirements
 
 ```bash
-sudo apt install -y libguestfs-tools qemu-utils qemu-system xz-utils zstd curl
+sudo apt install -y libguestfs-tools qemu-utils qemu-system btrfs-progs xz-utils zstd curl
 ```
 
 The build host must match the target architecture: an arm64 host builds an arm64
@@ -17,7 +17,7 @@ VM is Debian arm64 and libguestfs falls back to TCG:
 
 ```bash
 podman machine ssh
-sudo apt install -y libguestfs-tools qemu-utils qemu-system zstd
+sudo apt install -y libguestfs-tools qemu-utils qemu-system btrfs-progs zstd
 mkdir ~/build && cd ~/build
 cp -a /Users/<you>/path/to/repo/{build.sh,resources} .
 sudo env LIBGUESTFS_BACKEND_SETTINGS=force_tcg ./build.sh

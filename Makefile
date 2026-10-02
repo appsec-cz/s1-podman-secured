@@ -22,6 +22,7 @@ install-deps:
 		libguestfs-tools \
 		qemu-utils \
 		qemu-system \
+		btrfs-progs \
 		xz-utils \
 		zstd \
 		curl

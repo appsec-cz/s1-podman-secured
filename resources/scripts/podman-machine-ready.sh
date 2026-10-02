@@ -39,7 +39,9 @@ wait_for() {
 }
 
 ignition_done() { [ -f /var/lib/ignition-provider-complete ]; }
-network_up()    { ip addr show | grep -q "inet "; }
+# scope global: plain "inet " also matches 127.0.0.1, which made this wait pass
+# before any interface had an address.
+network_up()    { ip -4 addr show scope global | grep -q "inet "; }
 ssh_up()        { systemctl is-active --quiet ssh.service; }
 
 wait_for "the Ignition provider" "$MAX_WAIT_IGNITION" fatal ignition_done

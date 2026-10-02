@@ -302,23 +302,33 @@ set prefix=(\$root)'/boot/grub'
 configfile \$prefix/grub.cfg
 ESPEOF
 
+# grub.cfg is edited here on the build host rather than with sed inside
+# guestfish. The partition hint needs an anchored pattern - "hd0,gpt1" also
+# matches the start of "hd0,gpt15" - and getting a backreference through the
+# heredoc, guestfish's own escape handling and sed in one piece is not worth
+# the risk on the file that decides whether the image boots.
+GRUB_CFG="$CACHE_DIR/grub.cfg"
+guestfish --ro -a "$WORK_IMAGE" -i download /boot/grub/grub.cfg "$GRUB_CFG"
+sed -E -i \
+    -e "s/$OLD_UUID/$NEW_UUID/g" \
+    -e 's/insmod ext2/insmod btrfs/g' \
+    -e "s/(hd0|ahci0),gpt1([^0-9]|\$)/\\1,gpt$ROOT_PARTNUM\\2/g" \
+    "$GRUB_CFG"
+
 guestfish -a "$WORK_IMAGE" -i <<EOF
 # Update fstab - filesystem type, mount options and UUID
 command "sed -i 's/ext4/btrfs/g' /etc/fstab"
 command "sed -i 's/errors=remount-ro/compress=zstd,noatime/g' /etc/fstab"
 command "sed -i 's/$OLD_UUID/$NEW_UUID/g' /etc/fstab"
 
-# Update GRUB - filesystem UUID, btrfs module, partition hints
-command "sed -i 's/$OLD_UUID/$NEW_UUID/g' /boot/grub/grub.cfg"
-command "sed -i 's/insmod ext2/insmod btrfs/g' /boot/grub/grub.cfg"
-command "sed -i 's/hd0,gpt1/hd0,gpt$ROOT_PARTNUM/g' /boot/grub/grub.cfg"
-command "sed -i 's/ahci0,gpt1/ahci0,gpt$ROOT_PARTNUM/g' /boot/grub/grub.cfg"
+# GRUB - filesystem UUID, btrfs module and partition hints, edited above
+upload $GRUB_CFG /boot/grub/grub.cfg
 command "sed -i 's/$OLD_UUID/$NEW_UUID/g' /etc/default/grub"
 
 # Replace the EFI stub loader config on the ESP
 upload $ESP_GRUB_CFG /boot/efi/EFI/debian/grub.cfg
 EOF
-rm -f "$ESP_GRUB_CFG"
+rm -f "$ESP_GRUB_CFG" "$GRUB_CFG"
 
 # Verify the bootloader actually points at the converted filesystem - a silent
 # no-op here produces an image that never boots, with no error at build time.

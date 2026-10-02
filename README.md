@@ -109,7 +109,7 @@ s1-podman-secured/
 ## Requirements
 
 **Build host:** Debian or Ubuntu with `libguestfs-tools`, `qemu-system`,
-`qemu-utils`, `zstd`.
+`qemu-utils`, `btrfs-progs`, `zstd`.
 
 **Mac:** podman 6.x (Podman Desktop optional), Apple Silicon for Rosetta.
 
