@@ -170,7 +170,7 @@ test_containers_are_generated_one_per_file() {
     # and hand them a network namespace they never shared.
     assert_contains "$DEPLOY" "--podman-only" \
         "the definition keeps what plain Kubernetes YAML cannot express"
-    assert_contains "$DEPLOY" "podman kube play --no-pod-prefix" \
+    assert_contains "$DEPLOY" "podman kube play --start=false --no-pod-prefix" \
         "the restored container keeps its own name"
     assert_contains "$DEPLOY" 'podman rename "${c}-pod-${c}" "$c"' \
         "and a podman without that flag is still handled"
