@@ -41,7 +41,8 @@ podman-machine-health: FAULT(1) units=ok podman=ok/0running storage=overlay net=
 `journal=blind` is the failure below that makes `podman logs` silently empty;
 `storage=` anything but btrfs means the config did not take effect; `podman=
 unresponsive` means the runtime is gone even though the machine is up;
-`ssh=ok/Ndropped` counts connections sshd turned away this boot - see
+`ssh=ok/Ndropped` means sshd turned connections away this boot - at least N,
+since sshd does not log every one - see
 [`podman machine ssh` fails now and then](#podman-machine-ssh-fails-now-and-then-exit-255-no-message).
 
 A machine that is idle and well does not keep writing, so an old timestamp is not

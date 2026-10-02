@@ -85,7 +85,9 @@ collect() {
 
     # sshd is how everything on the Mac reaches this machine, and when it turns
     # a client away the client exits 255 without a word. Connections sshd has
-    # dropped this boot are counted rather than treated as a fault: the count
+    # dropped this boot are counted rather than treated as a fault. sshd does
+    # not log every drop - twenty failed calls once left three lines - so the
+    # count is a lower bound, but it is never zero when it happened. The count
     # changes the line, so every new drop leaves a trace on the host, and a
     # burst that is long over does not keep the machine marked as broken.
     local ssh_drops
