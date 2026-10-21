@@ -40,7 +40,21 @@ This is the layer that tells you the configuration is not just present but in
 effect - btrfs really in use, Rosetta really translating, ports really reaching
 macOS, `podman logs` really returning output.
 
-**After touching backup or restore**, the round trip on a throwaway machine:
+**After touching backup or restore**, verify the data round trip:
+
+For a quick volume-only check without replacing or stopping the running machine:
+
+```bash
+./tests/integration/test_volume_transfer.sh
+```
+
+This creates and removes only its own `s1-test-transfer-*` volumes, in rootless
+and rootful stores. It tests the SSH helper and `deploy.sh`'s guest restore with
+real binary data, permissions and a symlink. It is also part of `integration`.
+Unit tests inject failed imports, missing archives and SSH disconnects and check
+that the host cannot discard the backup on those paths.
+
+The full machine replacement still needs the migration layer:
 
 ```bash
 ./tests/run.sh migration

@@ -51,6 +51,66 @@ a single vsock device on port 1025, and the socket behind it exists only while
 `podman machine start` is waiting for the ready signal, so there is nothing on the
 host to ask afterwards.
 
+## Volume restore fails with `Not Found`
+
+The macOS client reports this while importing a volume:
+
+```
+unmarshalling error ... data "Not Found\n": invalid character 'N' looking for beginning of value
+```
+
+Podman 5.4.2 in the Debian image has no volume import/export REST endpoints.
+The 5.6.1 client asks for one and gets a plain HTTP 404. The
+[5.4.2 routes](https://github.com/containers/podman/blob/v5.4.2/pkg/api/server/register_volumes.go)
+and [5.6.1 routes](https://github.com/containers/podman/blob/v5.6.1/pkg/api/server/register_volumes.go)
+show the difference. Check both sides with `podman version`; a successful image
+load or machine restart does not exercise the missing volume endpoint.
+
+Use [scripts/podman-volume-transfer.sh](../scripts/podman-volume-transfer.sh) to
+run volume operations inside the VM over SSH. It streams archives, so the backup
+does not need to be mounted inside the VM. Run it as the macOS user who owns the
+machine; in Jamf use the `as_user` wrapper from
+[deployment-jamf.md](deployment-jamf.md#why-the-script-must-run-as-the-user).
+For the customer's pkg-installed CLI, pass `--podman /opt/podman/bin/podman`.
+
+For example, after setting `v` to a volume name and `DIR` to the backup directory:
+
+```bash
+./scripts/podman-volume-transfer.sh --podman /opt/podman/bin/podman \
+  --machine podman-machine-default export "$v" "$DIR/volumes/$v.tar"
+
+./scripts/podman-volume-transfer.sh --podman /opt/podman/bin/podman \
+  --machine podman-machine-default import "$v" "$DIR/volumes/$v.tar"
+```
+
+Stop all applications writing to the volume before exporting or importing. For
+databases, take the application's own consistent backup or shut it down cleanly.
+The helper detects the machine's rootful setting; pass `--rootful` or
+`--rootless` explicitly if recovering data from the other store. Machine commands
+still run as the macOS owner; rootful means `sudo -n podman` **inside** the VM.
+
+Import requires an existing volume. Recreate it using the original name, driver,
+labels and options from the saved `podman volume inspect` metadata. The helper
+deliberately does not create a default volume on your behalf. If the metadata is
+missing, recover it from the original deployment/Compose definition before
+assuming a plain local volume is equivalent. Import merges into existing data;
+use a fresh recovery target for testing and do not repeatedly import into a live
+application's volume. See [Podman's import semantics](https://docs.podman.io/en/latest/markdown/podman-volume-import.1.html).
+
+A failed transfer returns nonzero. Export uses a temporary file and replaces the
+destination only after successful SSH transfer and tar validation. Import can
+leave partial data when interrupted: retain the archive and validate the files
+and application before declaring recovery complete. Logging and continuing after
+an import error does not restore the missing data.
+
+`deploy.sh` already uses guest-side operations and now rejects failed imports,
+missing/invalid archives and interrupted SSH. It keeps the backup and does not
+start reconstructed applications after a volume import failure. Its `--restore`
+accepts only its own backup layout and manifest; a customer's separate Jamf
+backup is not automatically compatible. Use the helper for those archives, then
+restore container definitions with the customer's procedure. Preserve the source
+backup until the recovered application has been checked.
+
 ## `podman machine start` hangs forever, then the machine will not even stop
 
 `podman machine stop` times out too, and the VM sits at 0% CPU. The serial log

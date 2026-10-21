@@ -562,19 +562,39 @@ print_backup_contents() {
 
 RESTORE_GUEST_SCRIPT='
 set -u
+fail=0
+# Check the promised archives before creating anything. An existing, empty
+# volume is not evidence that its data was restored.
+for list in images.txt volumes.txt expected.txt pods.txt running.txt; do
+    [ -f "$DIR/$list" ] || { echo "RESTORE_FAIL missing $list"; exit 1; }
+done
+if [ -s "$DIR/images.txt" ] && [ ! -f "$DIR/images.tar" ]; then
+    echo "RESTORE_FAIL missing images.tar"
+    exit 1
+fi
+while read -r v; do
+    [ -n "$v" ] || continue
+    if ! tar -tf "$DIR/volumes/$v.tar" >/dev/null; then
+        echo "RESTORE_FAIL missing or invalid volume archive $v"
+        fail=1
+    fi
+done < "$DIR/volumes.txt"
+[ "$fail" -eq 0 ] || exit 1
+
 if [ -f "$DIR/images.tar" ]; then
-    podman load -i "$DIR/images.tar" >/dev/null || echo "RESTORE_FAIL load"
+    podman load -i "$DIR/images.tar" >/dev/null || { echo "RESTORE_FAIL load"; exit 1; }
 fi
 
 if [ -s "$DIR/volumes-create.sh" ]; then
-    bash "$DIR/volumes-create.sh" >/dev/null 2>&1 || true
+    bash "$DIR/volumes-create.sh" || { echo "RESTORE_FAIL volume create"; exit 1; }
 fi
 if [ -s "$DIR/volumes.txt" ]; then
     while read -r v; do
-        [ -f "$DIR/volumes/$v.tar" ] || continue
-        podman volume import "$v" "$DIR/volumes/$v.tar" || echo "RESTORE_FAIL volume $v"
+        podman volume import "$v" "$DIR/volumes/$v.tar" || { echo "RESTORE_FAIL volume $v"; fail=1; }
     done < "$DIR/volumes.txt"
 fi
+# Do not start applications on missing data, even if the volume name exists.
+[ "$fail" -eq 0 ] || exit 1
 
 # kube play always builds a pod, but --no-pod-prefix keeps the container itself
 # under its own name instead of <pod>-<name>. Every script and habit built around
@@ -588,8 +608,9 @@ for f in "$DIR"/containers/*.yaml; do
     [ -e "$f" ] || continue
     podman kube play --start=false --no-pod-prefix "$f" >/dev/null 2>&1 ||
         podman kube play --start=false "$f" >/dev/null 2>&1 ||
-        echo "RESTORE_FAIL play $(basename "$f" .yaml)"
+        { echo "RESTORE_FAIL play $(basename "$f" .yaml)"; fail=1; }
 done
+[ "$fail" -eq 0 ] || exit 1
 
 if [ -s "$DIR/expected.txt" ]; then
     # Fallback for a podman without --no-pod-prefix - Debian trixie ships 5.4.2,
@@ -598,32 +619,37 @@ if [ -s "$DIR/expected.txt" ]; then
     # comes back as <name>-pod-<name>; a pod member as <pod>-<name>.
     while read -r c; do
         if podman container exists "${c}-pod-${c}" && ! podman container exists "$c"; then
-            podman rename "${c}-pod-${c}" "$c" >/dev/null 2>&1 || echo "RESTORE_FAIL rename $c"
+            podman rename "${c}-pod-${c}" "$c" >/dev/null 2>&1 || { echo "RESTORE_FAIL rename $c"; fail=1; }
         fi
     done < "$DIR/expected.txt"
     if [ -s "$DIR/members.txt" ]; then
         while IFS="$(printf "\t")" read -r pod c; do
             [ -n "$c" ] || continue
             if podman container exists "${pod}-${c}" && ! podman container exists "$c"; then
-                podman rename "${pod}-${c}" "$c" >/dev/null 2>&1 || echo "RESTORE_FAIL rename $c"
+                podman rename "${pod}-${c}" "$c" >/dev/null 2>&1 || { echo "RESTORE_FAIL rename $c"; fail=1; }
             fi
         done < "$DIR/members.txt"
     fi
+
+    [ "$fail" -eq 0 ] || exit 1
 
     # Start what was running, nothing else. A container in a pod brings its
     # pod up with it.
     if [ -s "$DIR/running.txt" ]; then
         while read -r c; do
-            podman start "$c" >/dev/null 2>&1 || echo "RESTORE_FAIL start $c"
+            podman start "$c" >/dev/null 2>&1 || { echo "RESTORE_FAIL start $c"; fail=1; }
         done < "$DIR/running.txt"
     fi
 fi
+[ "$fail" -eq 0 ] || exit 1
+echo RESTORE_OK
 '
 
 VERIFY_GUEST_SCRIPT='
 set -u
+set -o pipefail
 fail=0
-now=$(mktemp -d)
+now=$(mktemp -d) || exit 1
 
 # Every list is what was promised. A list that is not there cannot be compared
 # against, and a loop reading a missing file simply runs zero times - which used
@@ -632,11 +658,11 @@ for f in images.txt volumes.txt expected.txt pods.txt running.txt; do
     [ -f "$DIR/$f" ] || { echo "MISSING backup file $f"; fail=1; }
 done
 
-podman images --format "{{.Repository}}:{{.Tag}}" | sort -u > "$now/images"
-podman volume ls --format "{{.Name}}" | sort > "$now/volumes"
-podman ps -a --format "{{.Names}}" | sort > "$now/containers"
-podman ps --format "{{.Names}}" | sort > "$now/running"
-podman pod ls --format "{{.Name}}" | sort > "$now/pods"
+podman images --format "{{.Repository}}:{{.Tag}}" | sort -u > "$now/images" || fail=1
+podman volume ls --format "{{.Name}}" | sort > "$now/volumes" || fail=1
+podman ps -a --format "{{.Names}}" | sort > "$now/containers" || fail=1
+podman ps --format "{{.Names}}" | sort > "$now/running" || fail=1
+podman pod ls --format "{{.Name}}" | sort > "$now/pods" || fail=1
 
 while read -r i; do
     grep -qx "$i" "$now/images" || { echo "MISSING image $i"; fail=1; }
@@ -691,7 +717,7 @@ for v in volumes:
     lines.append(" ".join(shlex.quote(part) for part in cmd))
 
 with open(os.path.join(d, "volumes-create.sh"), "w") as fh:
-    fh.write("\n".join(lines) + "\n" if lines else "")
+    fh.write("set -e\n" + "\n".join(lines) + "\n" if lines else "")
 PY
 }
 
@@ -731,19 +757,25 @@ restore_machine() {
 
     echo -e "${BLUE}Restoring machine data...${NC}"
     echo "  From: $dir"
-    write_volume_create_script "$dir"
+    write_volume_create_script "$dir" || return 1
 
-    local out
-    out=$(guest_script "$RESTORE_GUEST_SCRIPT" "DIR=$(printf '%q' "$dir")" 2>&1 | tr -d '\r')
-    if printf '%s' "$out" | grep -q "RESTORE_FAIL"; then
-        echo -e "${YELLOW}  Some items did not restore:${NC}"
-        printf '%s\n' "$out" | grep "RESTORE_FAIL" | sed 's/^/    /'
+    local out rc=0
+    out=$(guest_script "$RESTORE_GUEST_SCRIPT" "DIR=$(printf '%q' "$dir")" 2>&1) || rc=$?
+    out=$(printf '%s' "$out" | tr -d '\r')
+    if [ "$rc" -ne 0 ] || printf '%s' "$out" | grep -q "RESTORE_FAIL" \
+        || ! printf '%s' "$out" | grep -qx "RESTORE_OK"; then
+        echo -e "${RED}  The restore did not complete (exit $rc):${NC}"
+        printf '%s\n' "$out" | tail -20 | sed 's/^/    /'
+        echo "  Backup kept at $dir"
+        return 1
     fi
 
     echo -e "${BLUE}Verifying...${NC}"
-    local report
-    report=$(guest_script "$VERIFY_GUEST_SCRIPT" "DIR=$(printf '%q' "$dir")" 2>&1 | tr -d '\r')
-    if printf '%s' "$report" | grep -q "VERIFY_OK"; then
+    local report verify_rc=0
+    report=$(guest_script "$VERIFY_GUEST_SCRIPT" "DIR=$(printf '%q' "$dir")" 2>&1) || verify_rc=$?
+    report=$(printf '%s' "$report" | tr -d '\r')
+    if [ "$verify_rc" -eq 0 ] && printf '%s' "$report" | grep -qx "VERIFY_OK" \
+        && ! printf '%s' "$report" | grep -qx "VERIFY_FAILED"; then
         echo -e "${GREEN}  Everything in the backup is back${NC}"
         discard_backup "$dir"
         return 0

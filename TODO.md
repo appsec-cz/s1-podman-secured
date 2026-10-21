@@ -1,6 +1,6 @@
 # TODO - Future Improvements
 
-Last reviewed: 2026-08-31
+Last reviewed: 2026-10-21
 
 ## Current Status
 
@@ -23,6 +23,415 @@ Desktop's own kind extension.
 
 The machine also reports on itself at the end of every boot; see
 [docs/troubleshooting.md](docs/troubleshooting.md#start-here).
+
+## In progress: repair customer volume migration
+
+Reviewed 2026-10-21. The API diagnosis below is correct, but a custom Podman
+package and signed repository must not delay recovery of existing backups.
+The immediate fix keeps trixie's container stack and transfers volumes through
+SSH. Packaging remains a separate, deferred project below.
+
+### Evidence and corrections to the original plan
+
+- Compared upstream `pkg/api/server/register_volumes.go` at
+  [v5.4.2](https://github.com/containers/podman/blob/v5.4.2/pkg/api/server/register_volumes.go)
+  and [v5.6.1](https://github.com/containers/podman/blob/v5.6.1/pkg/api/server/register_volumes.go).
+  The former has no volume import/export routes; the latter registers both.
+  This is an API capability gap, not a JSON or archive filename defect.
+- The locally running guest reports `podman version 5.4.2` (checked 2026-10-21).
+  The customer's exact server version and current Jamf scripts still need
+  collecting; their supplied log reports only the host CLI version.
+- An older server does not necessarily fail every client command. Conversely,
+  `server minor >= client minor` is not a compatibility guarantee. Validate a
+  concrete client/server pair and the operations the fleet uses.
+- `deploy.sh` already avoids the missing REST endpoint, but was **not safe on
+  import failure**: it logged the error and verified only volume existence, then
+  could delete the backup. An empty volume could therefore count as restored.
+- Do not infer the anonymous volume's owner from its name. Keep its name,
+  driver, labels and options from inspect metadata; do not invent missing ones.
+- Do not pass a customer's legacy backup directly to `deploy.sh --restore`.
+  That command requires this project's manifest and layout. Use the volume
+  transfer helper to recover a legacy volume archive, then the customer's
+  container reconstruction procedure after validating the data.
+
+### Delivery order
+
+1. **Immediate recovery and Jamf integration**
+   - [x] Provide `scripts/podman-volume-transfer.sh`: select an explicit machine,
+     auto-detect its store or override rootful/rootless, stream through SSH,
+     require an existing volume, validate tar structure, preserve a previous
+     export on failure, and propagate nonzero status.
+   - [x] Document running as the machine owner, creating volumes with original
+     metadata, stopping writers, retaining backups, and checking recovered data.
+   - [ ] Apply the helper to the customer's actual scripts (not present here)
+     and test their October 9 archive on a test machine before fleet rollout.
+2. **Prevent false success and backup loss in this repo**
+   - [x] Preflight required lists and volume archives before a restore.
+   - [x] Fail on image load, volume creation/import, reconstruction, start or SSH
+     failure; require an explicit completion marker and successful verification.
+   - [x] Keep the backup on failure; do not start restored applications after a
+     volume import failure. A failed inventory cannot verify an empty backup.
+   - [x] Add regression tests for missing archives, failed import/create,
+     interrupted SSH, and the host's backup deletion gate.
+   - [x] Record the live rootless/rootful round-trip results below.
+3. **Release validation**
+   - [ ] Run the complete machine-replacement migration on a disposable machine
+     in a maintenance window; it stops the current VM, so do not run it alongside
+     a build. Test interrupted restores too, retaining the backup.
+   - [ ] Verify SentinelOne connectivity and health in the console separately;
+     the customer's `Initializing` / `Connectivity Off` output proves neither.
+4. **Optional server upgrade**
+   - Revisit the packaging project only for a demonstrated requirement for the
+     remote API/new features, or a security/lifecycle requirement. Choose a
+     maintained release after assessing updates and the fleet's CLI version;
+     5.6.1 below is the original reproduction target, not an evergreen release.
+   - Keep Debian origin gates, package signing, dependency isolation, rollback
+     and the client/server test matrix from the original plan. Explicitly test
+     API capabilities rather than treating version ordering as proof.
+
+### Verification results
+
+Checked 2026-10-21:
+
+- `./tests/run.sh unit`: 70 Python tests, 160 resource assertions and 57 deploy
+  assertions passed. The 14 new Python tests cover restore and transfer failures.
+- `./tests/integration/test_volume_transfer.sh`: **22 checks passed** on macOS
+  client **6.1.4** / Debian guest **5.4.2**, rootless and rootful. Real binary data,
+  ownership, permissions and symlink survived the helper round trip; the guest
+  restore and the complete `deploy.sh --restore --keep-backup` entry point passed.
+- The original VM remained running and no `s1-test-transfer-*` volumes remained
+  in either store after cleanup. No workload or machine was stopped.
+- New shell scripts pass ShellCheck at warning severity. `deploy.sh` retains
+  existing ShellCheck warnings outside the changed restore code.
+- The customer's client **5.6.1**, real archive, Jamf execution and SentinelOne
+  console state remain unverified. Full replacement migration was not run: it
+  would stop the active VM. This is a tested repository hotfix, not proof of
+  customer deployment or a new image release.
+
+## Remaining priorities after the migration hotfix
+
+Review of the remaining TODO and implementation on 2026-10-21:
+
+1. **Before customer rollout:** test the real Jamf policies, client 5.6.1 and
+   saved archive, then run the complete disposable-machine migration. The
+   isolated-volume tests above do not replace those acceptance checks.
+2. **Next code fix: propagate SentinelOne deployment failures.** In
+   `deploy_sentinelone()`, token registration failure only prints a warning;
+   service enable/start failure is ignored, and an inactive service only prints
+   another warning. Neither sets `S1_STATUS=1`. Consequently deployment can exit
+   zero without a running/registered agent. Preserve the data-restore path, but
+   return a failed deployment status for failed requested registration or service
+   startup. Test these paths without a real token. Keep installation, service
+   activity, agent health and management connectivity as separate outcomes;
+   management connectivity can require initialization time and must not be
+   inferred from `systemctl is-active`.
+3. **Security acceptance:** confirm connectivity, health and actual container
+   attribution in the SentinelOne console, rootless and rootful. Binary strings
+   and provider log mentions are historical clues, not proof of supported
+   container discovery or its absence. The existing registration integration
+   test skips disconnected agents; a green suite alone does not close this.
+4. **Revalidate historical host/agent issues before changing machines:** the
+   dangling Docker socket/CLI, scanner error counts and vfkit port collision
+   below describe earlier observations. Check the affected host and current
+   agent/CLI version first. Fix Docker client compatibility where required by
+   actual workloads; retain rootless/rootful as a workload decision.
+5. **Deferred:** custom Podman packaging, signed apt hosting and its release
+   process. No additional blocker for the SSH-based migration hotfix is proven
+   by those open design questions. USB and Zincati remain out of scope.
+
+## Deferred: ship our own podman, matched to the client
+
+Status: **deferred; not implemented.** Original proposal dated 2026-10-14. Whoever
+picks this up works through the phases in order; each phase ends with checks
+that must pass before the next one starts. Record results in this section as
+you go - numbers, versions, what failed and why - not only "done".
+
+### Why
+
+A customer's migration failed on restore:
+
+```
+[PodmanRestore] Importing volume: b01129e9...
+Error: unmarshalling error into &errorhandling.ErrorModel{...}, data "Not Found\n": invalid character 'N' looking for beginning of value
+```
+
+Their Jamf scripts run `podman volume import` / `podman volume export` from the
+Mac, i.e. through the remote API. The client on their Macs is podman **5.6.1**
+(`/opt/podman/bin/podman`, the official pkg, deployed by Jamf). The image ships
+trixie's podman **5.4.2**, whose API has no volume import/export endpoint; the
+router answers a bare `Not Found`, which the client then fails to parse. The
+successful backup is consistent with a previous server that supported these
+endpoints, but the supplied log does not establish its version. The original
+investigation recorded this reproduction on 2026-10-14 against a 5.4.2 machine:
+
+```
+podman volume create x && podman volume import x some.tar   # Error: Not Found
+podman volume export x -o out.tar                           # Error: Not Found
+```
+
+The vendored upstream test says the same: `160-volumes.bats` has
+`skip_if_remote "volumes import is not applicable on podman-remote"` at v5.4.2.
+
+`deploy.sh` avoids this API error by running export/import inside the guest
+over SSH. Its separate false-success bug is addressed in the immediate plan above.
+
+The underlying problem is client/server skew. In a managed fleet the customer
+controls the client version, so the server can be kept at the same minor. That
+is what upstream machine-os does, and what this plan does with our own builds.
+
+### What we give up, and accept
+
+trixie-security stops covering podman. The stack came from trixie precisely for
+that (see `docs/architecture.md`, "Kernel and container stack", and commit
+`19112c9`). From now on **we** are the ones who ship podman's security fixes:
+upstream fixes only its latest minor, so following upstream releases promptly
+*is* the security process. Phase 5 defines it. If that process cannot be staffed,
+stop and go back to trixie's podman - do not ship builds nobody updates.
+
+### Version policy
+
+- Track **containers/podman** releases (<https://github.com/containers/podman/releases>),
+  not Podman Desktop. Podman Desktop has its own cadence and only bundles a podman
+  installer. What matters is the podman CLI that Jamf puts on the Macs.
+- Support explicitly tested client/server pairs. Matching the customer's minor
+  is a useful starting point, but a newer server alone does not prove compatibility.
+  Coordinate client changes with the fleet owner (open question 1).
+- Patch releases of the current minor are taken as they come; ones with a CVE
+  fix are taken urgently (phase 5).
+
+### Phase 0 - spike: can we build podman 5.6.1 for trixie, and what does it cost?
+
+Goal: an answer with numbers, before anything is committed to. Time box: two
+days. Do the work on a branch; nothing here goes to `main` until phase 3.
+
+Steps:
+
+1. Decide the build approach by trying both, in a `debian:trixie` arm64
+   container (podman inside the machine is fine):
+   - **A. Backport Debian's packaging.** Take the podman source package from
+     Debian (salsa.debian.org/debian/libpod, or sid) at the version closest to
+     5.6.1 and rebuild it on trixie (`backportpackage`, or `sbuild` /
+     `dpkg-buildpackage`). Debian's source is repacked (`+ds1`) and is likely
+     built against Debian-packaged Go libraries (`golang-github-containers-*`)
+     rather than upstream's `vendor/` - **verify this**; if so, those libraries
+     have to be backported too, and count them.
+   - **B. Upstream tarball with its own `vendor/`.** Build the upstream v5.6.1
+     release with upstream's vendored modules and a minimal `debian/` of our
+     own. Fewer moving parts; diverges from Debian's file layout, so compare
+     with `dpkg -L podman` from trixie and keep the same paths (binaries in
+     `/usr/bin`, systemd units in `/usr/lib/systemd/{system,user}`,
+     `/usr/libexec/podman/*`, man pages optional).
+2. Go toolchain: read the `go` directive in podman's `go.mod` at the tag and
+   compare with trixie's `golang-go`. If trixie's is too old, use the official
+   Go tarball for the build only, verified against its published sha256. The
+   toolchain must not end up in the image.
+3. Runtime dependencies: from podman's release notes and `go.mod` / docs at the
+   tag, find the minimum versions of crun, conmon, netavark, aardvark-dns,
+   passt and containers-common that 5.6.1 expects. Compare with trixie (crun
+   1.21, conmon 2.1.12, netavark and aardvark-dns 1.14) and backports (passt).
+   Rebuild only what is actually required; prefer keeping trixie's.
+4. Check what the build pulls: `apt-get install --simulate` of the resulting
+   `.deb`s on a clean `debian:trixie`. The count of packages that are not from
+   trixie must be the ones we built and nothing else - no libc6, systemd or
+   OpenSSL from anywhere else (that is what ended the unstable experiment).
+5. Install the result into a throwaway machine without rebuilding the image:
+   `GUEST_PATCH` (see `tests/podman-system/VENDORED.md`, "Trying a fix without
+   rebuilding") with a script that `dpkg -i`s the debs and restarts
+   `podman.socket` for core and root.
+
+Checks - all must hold to call the spike a success:
+
+- [ ] `podman version` from the Mac shows Server `5.6.1`
+- [ ] from the Mac, over the remote API, against that machine:
+      `podman volume create v && podman volume import v t.tar && podman volume export v -o o.tar`
+      succeeds and `o.tar` contains what `t.tar` did
+- [ ] `apt-get install --simulate` on clean trixie pulls nothing but our debs and
+      trixie packages (list them here)
+- [ ] the vendored suite synced to v5.6.1 (`PODMAN_VERSION=v5.6.1 ./tests/podman-system/sync.sh`)
+      runs in a throwaway machine; compare with the 5.4.2 baseline in
+      `tests/podman-system/VENDORED.md` (583 ok / 34 failed / 79 skipped).
+      Every failure that is not in the baseline's categories is characterised
+      before going on
+- [ ] the migration layer passes: `./tests/run.sh migration`
+
+Write down here: approach chosen (A or B) and why, Go version used, which
+packages had to be rebuilt, the dependency simulation output, suite numbers,
+and an estimate of the effort for each later release. **Then stop and let the
+owner decide whether to continue** (decision point after phase 0).
+
+### Phase 1 - reproducible build
+
+1. Put the packaging in this repo (`packaging/podman/` or similar), with a
+   script that builds the debs from a version argument:
+   `./packaging/build-podman.sh v5.6.1` -> `.deb`s in `output/debs/`.
+2. Version string that sorts above trixie's and says where it comes from, e.g.
+   `5.6.1+ds1-0s1~trixie1` (pick the form that fits the approach; it must sort
+   above any `5.4.2+ds1-*+deb13uN` trixie-security may publish - check with
+   `dpkg --compare-versions`).
+3. Build runs in a `debian:trixie` container, arm64 (x86_64 too if `ARCH=x86_64`
+   images are still built), with every input pinned: podman tag, Go tarball
+   sha256, base image digest.
+
+Checks:
+
+- [ ] two builds from a clean checkout produce debs with the same content
+      (`diffoscope` or at least `dpkg-deb -c` + binary sha256 compared)
+- [ ] `dpkg --compare-versions <ours> gt <trixie's>` holds, and also against a
+      hypothetical `5.4.2+ds1-2+deb13u9`
+- [ ] `podman version` of the installed package reports the expected version
+      and Go version
+
+### Phase 2 - signed apt repository
+
+1. A GPG signing key for the repo. Where the private key lives and who can sign
+   is open question 2 - do not generate a key that ends up in this repo.
+2. A plain apt repository (`reprepro` or `aptly`), suite name e.g.
+   `trixie-s1`. The name must not contain `sid`, `unstable`, `testing` or
+   `forky`: `install.sh` refuses those sources by regex.
+3. Hosting is open question 3 (customer's Artifactory can host Debian repos and
+   is reachable through their Zscaler; a public URL is the alternative). Every
+   machine must reach it, through Zscaler.
+
+Checks:
+
+- [ ] `apt-get update` in a clean `debian:trixie` with the repo configured via
+      `signed-by=` succeeds; with a wrong key it fails
+- [ ] `apt-cache policy podman` shows our version as candidate, from our repo
+- [ ] a tampered `Release` file is rejected
+
+### Phase 3 - image integration
+
+Files that have to change (read each one before changing it; the comments
+explain why things are the way they are):
+
+- `build.sh` - `PACKAGES` stays the single list. Add a switch, e.g.
+  `PODMAN_SOURCE=trixie|s1` (default `s1` once phase 4 passes), so an image
+  with trixie's podman can still be built as a fallback.
+- `resources/install.sh`
+  - install the repo key to `/usr/share/keyrings/`, the source to
+    `/etc/apt/sources.list.d/` with `signed-by=`, **kept in the image** so
+    machines receive updates through `apt-get upgrade` (same reasoning as
+    backports, see the comment at "Enabling trixie-backports")
+  - an apt preferences file pinning **only** our packages to our origin (by
+    `Origin`/`Label` of our `Release`), so trixie never replaces them and our
+    repo never replaces anything else
+  - the origin gate (`Verifying package origins`): today it fails on any
+    `,local]` package. Our packages come from a configured source so they are
+    not `local` - but add an explicit check that the podman stack's installed
+    version comes from our origin when `PODMAN_SOURCE=s1`, and from trixie
+    when `trixie`
+  - the version printout under `=== Container stack ===` and its comment
+- `resources/configs/storage.conf`, `resources/configs/storage-user.conf`,
+  `resources/scripts/post-ignition-setup.sh` - the runroot/graphroot split was
+  made for the difference between 5.4 and 5.8 (commit `ed2c44c`). Verify it
+  still holds for the new version, rootless **and** rootful; keep it working
+  for 5.4 too while `PODMAN_SOURCE=trixie` exists.
+- `deploy.sh` - the `--no-pod-prefix` fallback (around line 595) stays for 5.4;
+  verify the main path on the new version.
+- `resources/scripts/ignition-provider.py` - `SKIPPED_UNITS` and its comment
+  mention 5.4.2. `etc-containers.mount` must stay skipped regardless of version
+  (the image's `/etc/containers` must not be hidden); fix only the wording.
+- docs: `docs/README.md`, `docs/architecture.md` ("Kernel and container
+  stack" table and text), `docs/build.md` ("Rebuilding when Debian moves" and
+  the gates list), `docs/troubleshooting.md` (5.4 sections), `docs/testing.md`,
+  `tests/podman-system/VENDORED.md` (new baseline)
+- `tests/podman-system/sync.sh` default `PODMAN_VERSION`, and re-sync `vendor/`
+
+Checks:
+
+- [ ] `make build` succeeds with `PODMAN_SOURCE=s1` and with `PODMAN_SOURCE=trixie`
+- [ ] in the s1 image: `apt-cache policy podman crun conmon netavark aardvark-dns`
+      shows each from the intended origin; `apt list --installed | grep ',local]'`
+      shows only `sentinelagent`
+- [ ] `./tests/run.sh image` passes
+- [ ] a simulated trixie-security podman update does not replace ours
+      (`apt-get -s upgrade` after adding a fake higher-than-5.4.2 trixie version
+      is the cheapest way to show it)
+
+### Phase 4 - full verification
+
+Run on the s1 image, in this order, and record the numbers here:
+
+- [ ] `./tests/run.sh` (unit, image, integration) - all green
+- [ ] `./tests/run.sh machine` - lifecycle
+- [ ] `./tests/run.sh migration` - data across a replacement, **and** the same
+      scenario done the customer's way: export and import volumes from the
+      Mac over the remote API. Add this as a test (in
+      `tests/machine/test_migration.sh` or a new integration test) so a server
+      without the endpoint fails loudly next time
+- [ ] `./tests/run.sh podman-system` rootless and `PODMAN_SYSTEM_ROOTFUL=1`;
+      new baseline written into `VENDORED.md` in the same form as the current one
+- [ ] client/server matrix from the Mac, at least: client 5.6.x (customer's),
+      client 6.x (current brew). `podman info`, run, logs, exec, build, volume
+      import/export, `kube play`, published port reachable from macOS
+- [ ] SentinelOne agent installs and runs on the new image (the customer's
+      script 2 output is the reference: agent state `Enabled`, health
+      eventually not `Initializing`)
+- [ ] `podman-machine-diagnostics` in the guest reports no `FAULT`
+
+### Phase 5 - release and security process
+
+1. **Watch:** podman GitHub releases and security advisories
+   (<https://github.com/containers/podman/security/advisories>), Go security
+   releases (a Go CVE means a rebuild even with no podman release), and the
+   Debian security tracker for podman/crun/conmon/netavark as an extra signal.
+   Automate the notification (a scheduled CI job or GitHub's release watch);
+   a human must get it.
+2. **Per release:** build (phase 1 script) -> sync vendored suite -> run phase 4
+   checks that are automatable -> publish to the repo -> machines get it via
+   `apt-get upgrade`. A new image is only needed when something outside the
+   packages changes.
+3. **Targets** (open question 4, proposal): security fix published to our repo
+   within 2 working days of upstream; non-security patch releases batched.
+4. **Rollback:** the repo keeps the previous version; document
+   `apt-get install podman=<previous>` in `docs/troubleshooting.md`.
+5. There is no CI in this repo today. Decide where builds run (open question 5).
+
+Checks:
+
+- [ ] a dry run of the whole loop for one patch release, timed
+- [ ] the rollback command was actually run once on a test machine
+
+### Independent, do now: fix the customer's scripts
+
+Implemented as `scripts/podman-volume-transfer.sh`; see
+[the recovery procedure](docs/troubleshooting.md#volume-restore-fails-with-not-found).
+Servers without these API endpoints need SSH transfer. The low-level equivalents
+below require explicitly naming the machine and choosing the correct store:
+
+```sh
+podman machine ssh podman-machine-default "podman volume create $v"
+podman machine ssh podman-machine-default "podman volume import $v -" < "$DIR/volumes/$v.tar"
+podman machine ssh podman-machine-default "podman volume export $v" > "$DIR/volumes/$v.tar"
+```
+
+Verified on 2026-10-14 against a 5.4.2 machine. The volume must exist before
+import. The failing volume (`b01129e9...`) has an anonymous-style name; its owner is
+unverified. Recreating it with a bare `volume create` loses its labels and
+options - `deploy.sh` regenerates them from `volume inspect`
+(`volumes-create.sh`), and the scripts should do the same. For future migrations,
+use `deploy.sh --preserve` / `--restore` with backups created by `deploy.sh`.
+
+### Open questions for the owner
+
+1. Will the customer agree to move their Jamf podman client only after we ship
+   the matching server?
+2. Where does the repo signing key live, and who may sign?
+3. Where is the apt repo hosted (customer's Artifactory, or ours)?
+4. Who owns the security watch, and what response time do we commit to?
+5. Where do the package builds run - no CI exists yet.
+
+### Working rules for this task
+
+- Destructive test layers (`machine`, `migration`, `podman-system`) create
+  throwaway machines named `s1-test*` and stop the running ones; they restore
+  the previously running set afterwards (`machine_stash_running` /
+  `machine_restore_running` in `tests/lib/machine.sh`). Check that the user's
+  machines are running again after a run.
+- An image build takes about 50 minutes and must not be interrupted; see
+  `docs/build.md`. Nothing may stop the machine the build runs in.
+- Commit messages: plain, in the style of `git log`; no `Co-Authored-By` or
+  other AI attribution lines.
 
 ## Open
 

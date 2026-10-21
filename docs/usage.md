@@ -174,6 +174,14 @@ that verifies deletes the backup it came from, because at that point the data
 exists twice and the copy in the machine is the one being used. Pass
 `--keep-backup` to hold on to it anyway.
 
+Export/import runs inside the guest over SSH, so it also works when the server
+has no volume transfer REST endpoints. Any failed import or interrupted SSH
+keeps the backup and fails the restore; volume existence alone is insufficient.
+The final inventory verifies names and running state, not application-level data
+consistency. Use `--keep-backup` until you have checked the recovered application.
+For archives made by separate Jamf scripts, see
+[volume recovery](troubleshooting.md#volume-restore-fails-with-not-found).
+
 What travels:
 
 - **Images** through `podman save`, all of them that carry a name.

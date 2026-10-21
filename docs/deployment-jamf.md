@@ -339,6 +339,12 @@ volume the user had.
 
 ## What to watch for
 
+For existing backup/restore policies that fail with `Not Found` on a volume,
+use the [volume recovery procedure](troubleshooting.md#volume-restore-fails-with-not-found).
+Ship `scripts/podman-volume-transfer.sh` with the policy and call it through
+`as_user`, passing `--podman /opt/podman/bin/podman`. An import failure must make
+the policy fail and retain the backup, even if other items can be restored.
+
 - **Disk space.** The machine's disk is sparse but grows to `--disk-size` (100 GB
   by default). A Mac with 30 GB free will fill up.
 - **First boot pulls nothing**, but the image is decompressed and copied - budget
